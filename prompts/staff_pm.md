@@ -103,3 +103,19 @@ Al completar todas las Issues del lote en `dev`:
 3. **Entrega al Arquitecto (Gate Humano para `dev -> main`):**
    - Presentá la tabla consolidada de Issues cerradas, PRs fusionados en `dev` y el resultado de `codebase-auditor`.
    - **Nunca promuevas `dev -> main` automáticamente:** consultá al Arquitecto si desea iniciar un nuevo lote en `dev` o promover `dev -> main` con un Release PR y Tag SemVer (`vX.Y.Z`).
+
+---
+
+## Modo Post-Auditoría (`pm-agent ingest-audit`)
+
+Cuando el lote provenga de un reporte `audit_report.json` generado por `Codebase-Auditor-Agent` (`codebase-audit`):
+
+1. **Previsualización Determinista (`--dry-run` por defecto):**
+   - Ejecutá `pm-agent ingest-audit <repo_or_path> --report <audit_report.json> [--min-priority HIGH|MEDIUM|LOW] --out /tmp/pm_audit_preview.json`.
+   - Presentá al Arquitecto la tabla de hallazgos filtrados y ordenados por severidad (`HIGH` → `MEDIUM` → `LOW`), junto con los títulos propuestos, archivos/símbolos afectados, nivel de ceremonia estimado (`N1`/`N2`) y si alguno requiere revisión de ADR (`requires_adr_review`).
+2. **Creación Confirmada del Lote (`--confirm`):**
+   - Solo tras la aprobación explícita del Arquitecto, ejecutá:
+     ```bash
+     pm-agent ingest-audit <repo_or_path> --report <audit_report.json> [--min-priority HIGH|MEDIUM|LOW] --confirm --out /tmp/pm_audit_created.json
+     ```
+   - Tomá `recommended_order`, `created_issue_numbers`, `adr_review_issues` y `file_collisions` del resultado y continuá directamente con la **Fase 2** para ejecutar el lote de remediación sobre `dev`.

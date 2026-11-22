@@ -42,6 +42,10 @@ pm-agent gate /ruta/al/repo --stage post-merge --issue 4 --pr 10
 
 # 4. Fase 3: Generar resumen consolidado del lote (JSON o Markdown)
 pm-agent batch-summary /ruta/al/repo --issues 4,5,6 --format markdown
+
+# 5. Modo Post-Auditoría: Previsualizar (--dry-run) o crear (--confirm) lote desde audit_report.json
+pm-agent ingest-audit /ruta/al/repo --report /tmp/audit_report.json --min-priority HIGH
+pm-agent ingest-audit /ruta/al/repo --report /tmp/audit_report.json --min-priority HIGH --confirm
 ```
 
 ## Instalación del CLI y Registro Declarativo en Antigravity
@@ -64,9 +68,9 @@ Registrar el directorio `skill/` de forma declarativa en `~/.gemini/config/skill
 
 ## Roadmap Evolutivo (`v0.2.0+`)
 
-- **`v0.1.0` — Modo Backlog (Actual):** Ejecución orquestada de lotes de GitHub Issues abiertas existentes en un repositorio objetivo (por lista de IDs `--issues`, por `--label` o todas las abiertas).
+- **`v0.1.0` — Modo Backlog (Implementado):** Ejecución orquestada de lotes de GitHub Issues abiertas existentes en un repositorio objetivo (por lista de IDs `--issues`, por `--label` o todas las abiertas).
+- **`v0.2.0+` — Modo Post-Auditoría (Implementado):** Ingerir hallazgos priorizados de `codebase-audit` (`audit_report.json`) con `pm-agent ingest-audit`, previsualizar el lote en `--dry-run`, crear las Issues aprobadas con `--confirm` y obtener el `recommended_order` listo para ejecutar la remediación en `dev`.
 - **`v0.2.0+` — Modo Épica / Idea:** Desglosar un requerimiento de alto nivel en múltiples Issues atómicas coherentes (con objetivos técnicos, criterios de aceptación y grafo de dependencias) antes de ejecutar el lote.
-- **`v0.2.0+` — Modo Post-Auditoría:** Ingerir hallazgos priorizados de `codebase-audit` (`audit_report.json`), crear las Issues aprobadas (`codebase-audit create-issues --confirm`) y ejecutar automáticamente el lote de remediación en `dev`.
 
 ## Tests
 
