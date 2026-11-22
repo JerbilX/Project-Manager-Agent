@@ -157,6 +157,15 @@ class TestGates(unittest.TestCase):
                 "headRefName": "fix/issue-5-ui",
                 "url": "https://github.com/JerbilX/Repo/pull/12",
             },
+            {
+                "number": 20,
+                "title": "release: v0.1.0",
+                "body": "Includes Closes #4 and Closes #5",
+                "state": "MERGED",
+                "baseRefName": "main",
+                "headRefName": "dev",
+                "url": "https://github.com/JerbilX/Repo/pull/20",
+            },
         ]
         mock_run.side_effect = [
             _proc(json.dumps(prs_payload)),

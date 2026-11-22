@@ -215,6 +215,7 @@ def _collect_summary_item(
     matching_prs = [pr for pr in raw_prs if _pr_matches_issue(pr, issue_number)]
     matching_prs.sort(
         key=lambda pr: (
+            1 if (pr.get("baseRefName") or "") == "dev" else 0,
             1 if (pr.get("state") or "").upper() == "MERGED" else 0,
             int(pr.get("number", 0)),
         ),
