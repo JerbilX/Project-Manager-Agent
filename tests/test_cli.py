@@ -11,11 +11,15 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from project_manager.audit_ingestor import AuditIngestError
 from project_manager.cli import main
 from project_manager.models import (
+    AuditIngestItem,
+    AuditIngestReport,
     BatchInspectionBundle,
     BatchSummaryItem,
     BatchSummaryReport,
+    CeremonyLevel,
     GateCheckResult,
     GateStage,
     GitWorkspaceStatus,
@@ -114,6 +118,62 @@ class TestCLI(unittest.TestCase):
             )
         self.assertEqual(code, 0)
         self.assertIn("Batch Execution Summary", out_buf.getvalue())
+
+    @patch("project_manager.cli.ingest_audit_report")
+    def test_cli_ingest_audit_dry_run_confirm_and_error(
+        self,
+        mock_ingest: unittest.mock.MagicMock,
+    ) -> None:
+        mock_ingest.return_value = AuditIngestReport(
+            repo="JerbilX/Repo",
+            report_path="/tmp/audit_report.json",
+            min_priority="HIGH",
+            dry_run=True,
+            summary="1 high finding",
+            total_findings=1,
+            selected_count=1,
+            skipped_count=0,
+            items=[
+                AuditIngestItem(
+                    finding_id="AUD-001",
+                    priority="HIGH",
+                    title="refactor(core): fix drift",
+                    body="body",
+                    suggested_ceremony=CeremonyLevel.N2,
+                    status="dry-run",
+                )
+            ],
+        )
+        out_buf = io.StringIO()
+        with redirect_stdout(out_buf):
+            code = main(["ingest-audit", "JerbilX/Repo", "--report", "/tmp/audit_report.json"])
+        self.assertEqual(code, 0)
+        mock_ingest.assert_called_once_with(
+            "JerbilX/Repo",
+            report_path="/tmp/audit_report.json",
+            min_priority="HIGH",
+            confirm=False,
+        )
+        payload = json.loads(out_buf.getvalue())
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(payload["items"][0]["finding_id"], "AUD-001")
+
+        mock_ingest.side_effect = AuditIngestError("Invalid audit report")
+        err_buf = io.StringIO()
+        with redirect_stderr(err_buf):
+            err_code = main(
+                [
+                    "ingest-audit",
+                    "JerbilX/Repo",
+                    "--report",
+                    "/tmp/bad.json",
+                    "--min-priority",
+                    "medium",
+                    "--confirm",
+                ]
+            )
+        self.assertEqual(err_code, 1)
+        self.assertIn("Invalid audit report", err_buf.getvalue())
 
 
 if __name__ == "__main__":

@@ -80,3 +80,21 @@ Por cada Issue `#<id>` en el orden aprobado del Plan de Lote:
    pm-agent batch-summary <repo_or_path> --issues <id1,id2,...> --format markdown
    ```
 3. Limpiar archivos temporales en `/tmp/` (`rm -f /tmp/pm_inspect.json /tmp/pm_batch_audit.json`) y presentar el reporte ejecutivo al Arquitecto para que decida si promueve `dev -> main`.
+
+---
+
+## Modo Post-Auditoría (`ingest-audit`)
+
+Cuando el usuario solicite convertir un reporte `audit_report.json` de `codebase-auditor` en un lote de remediación ejecutable en `dev`:
+
+1. **Previsualización segura (`--dry-run` por defecto):**
+   ```bash
+   pm-agent ingest-audit <repo_or_path> --report /tmp/audit_report.json --min-priority HIGH --out /tmp/pm_audit_preview.json
+   ```
+   Leer `/tmp/pm_audit_preview.json` y presentar al Arquitecto los hallazgos propuestos (ordenados `HIGH` → `MEDIUM` → `LOW`, archivos/símbolos afectados y ceremonia estimada `N1`/`N2`).
+2. **Materialización con `--confirm` y ejecución del lote:**
+   Una vez aprobado por el Arquitecto, crear las Issues reales en GitHub y obtener el orden de ejecución recomendado (`recommended_order`):
+   ```bash
+   pm-agent ingest-audit <repo_or_path> --report /tmp/audit_report.json --min-priority HIGH --confirm --out /tmp/pm_audit_created.json
+   ```
+   Limpiar `/tmp/pm_audit_preview.json` y `/tmp/pm_audit_created.json`, y ejecutar la **Fase 2** y **Fase 3** sobre las Issues creadas en `recommended_order`.

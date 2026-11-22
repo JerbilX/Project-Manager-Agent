@@ -22,6 +22,14 @@ class GateStage(StrEnum):
     POST_MERGE = "post-merge"
 
 
+class AuditPriority(StrEnum):
+    """Severity levels for codebase-auditor findings."""
+
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+
+
 @dataclass(slots=True)
 class GitWorkspaceStatus:
     """Local Git working tree and branch synchronization status."""
@@ -136,4 +144,50 @@ class BatchSummaryReport:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize batch summary report to a JSON-compatible dictionary."""
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class AuditIngestItem:
+    """Preview or created GitHub Issue derived from a codebase-auditor finding."""
+
+    finding_id: str
+    priority: str
+    title: str
+    body: str
+    labels: list[str] = field(default_factory=list)
+    file: str = ""
+    start_line: int | None = None
+    end_line: int | None = None
+    symbol: str = ""
+    evidence: str = ""
+    impact: str = ""
+    suggested_ceremony: CeremonyLevel = CeremonyLevel.N1
+    requires_adr_review: bool = False
+    referenced_files: list[str] = field(default_factory=list)
+    status: str = "dry-run"
+    issue_number: int | None = None
+    issue_url: str = ""
+
+
+@dataclass(slots=True)
+class AuditIngestReport:
+    """Result of ingesting a codebase-auditor report in dry-run or confirm mode."""
+
+    repo: str
+    report_path: str
+    min_priority: str
+    dry_run: bool
+    summary: str = ""
+    total_findings: int = 0
+    selected_count: int = 0
+    skipped_count: int = 0
+    items: list[AuditIngestItem] = field(default_factory=list)
+    created_issue_numbers: list[int] = field(default_factory=list)
+    recommended_order: list[int] = field(default_factory=list)
+    adr_review_issues: list[int] = field(default_factory=list)
+    file_collisions: dict[str, list[int]] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize audit ingestion report to a JSON-compatible dictionary."""
         return asdict(self)

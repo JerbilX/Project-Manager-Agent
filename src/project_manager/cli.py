@@ -8,6 +8,7 @@ import json
 import sys
 from pathlib import Path
 
+from project_manager.audit_ingestor import AuditIngestError, ingest_audit_report
 from project_manager.gates import (
     GateError,
     build_batch_summary,
@@ -15,7 +16,7 @@ from project_manager.gates import (
     run_pre_task_gate,
 )
 from project_manager.inspector import InspectorError, inspect_batch, parse_issue_list_arg
-from project_manager.models import GateStage
+from project_manager.models import AuditPriority, GateStage
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,6 +59,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     summary_p.add_argument("--no-fetch", action="store_true", help="Skip `git fetch --prune origin`.")
     summary_p.add_argument("--out", help="Optional output file path (defaults to stdout).")
+
+    audit_p = subparsers.add_parser(
+        "ingest-audit",
+        help="Preview or create GitHub Issues from a codebase-auditor audit_report.json.",
+    )
+    audit_p.add_argument("repo_or_path", nargs="?", default=".", help="Owner/repo slug or local path.")
+    audit_p.add_argument("--report", required=True, help="Path to codebase-auditor audit_report.json.")
+    audit_p.add_argument(
+        "--min-priority",
+        type=str.upper,
+        choices=[
+            AuditPriority.HIGH.value,
+            AuditPriority.MEDIUM.value,
+            AuditPriority.LOW.value,
+        ],
+        default=AuditPriority.HIGH.value,
+        help="Minimum finding severity to ingest (default: HIGH).",
+    )
+    audit_p.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Create GitHub Issues via `gh issue create` (defaults to safe --dry-run).",
+    )
+    audit_p.add_argument("--out", help="Optional output file path (defaults to stdout).")
 
     return parser
 
@@ -122,7 +147,18 @@ def main(argv: list[str] | None = None) -> int:
             _write_or_print(output, args.out)
             return 0
 
-    except (InspectorError, GateError, OSError) as exc:
+        if args.command == "ingest-audit":
+            audit_report = ingest_audit_report(
+                args.repo_or_path,
+                report_path=args.report,
+                min_priority=args.min_priority,
+                confirm=args.confirm,
+            )
+            payload = json.dumps(audit_report.to_dict(), indent=2, ensure_ascii=False)
+            _write_or_print(payload, args.out)
+            return 0
+
+    except (InspectorError, GateError, AuditIngestError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
