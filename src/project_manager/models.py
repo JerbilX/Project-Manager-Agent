@@ -63,6 +63,16 @@ class OpenPRInfo:
 
 
 @dataclass(slots=True)
+class BatchExecutionPlan:
+    """Deterministic topological plan, ADR review list, collisions, and cycles."""
+
+    recommended_order: list[int] = field(default_factory=list)
+    adr_review_issues: list[int] = field(default_factory=list)
+    file_collisions: dict[str, list[int]] = field(default_factory=dict)
+    dependency_cycles: list[list[int]] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class BatchInspectionBundle:
     """Full deterministic context collected during Phase 1 (Batch Triage)."""
 
@@ -72,6 +82,10 @@ class BatchInspectionBundle:
     issues: list[BatchIssue] = field(default_factory=list)
     open_prs: list[OpenPRInfo] = field(default_factory=list)
     governance_docs: dict[str, str] = field(default_factory=dict)
+    recommended_order: list[int] = field(default_factory=list)
+    adr_review_issues: list[int] = field(default_factory=list)
+    file_collisions: dict[str, list[int]] = field(default_factory=dict)
+    dependency_cycles: list[list[int]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize inspection bundle to a JSON-compatible dictionary."""

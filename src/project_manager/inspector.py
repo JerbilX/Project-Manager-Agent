@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import heapq
 import json
 import re
 import subprocess
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from project_manager.models import (
+    BatchExecutionPlan,
     BatchInspectionBundle,
     BatchIssue,
     CeremonyLevel,
@@ -374,6 +376,134 @@ def collect_governance_docs(
     return docs
 
 
+def _issue_priority_key(issue: BatchIssue) -> tuple[int, int]:
+    """Return deterministic priority key: ADR-required N2 issues first, then lowest issue number."""
+    adr_rank = (
+        0
+        if (issue.suggested_ceremony == CeremonyLevel.N2 and issue.requires_adr_review)
+        else 1
+    )
+    return (adr_rank, issue.number)
+
+
+def detect_file_collisions(issues: list[BatchIssue]) -> dict[str, list[int]]:
+    """Return paths in `referenced_files` touched by 2 or more issues in the batch."""
+    file_to_issues: dict[str, set[int]] = {}
+    for issue in issues:
+        for path in issue.referenced_files:
+            file_to_issues.setdefault(path, set()).add(issue.number)
+    return {
+        path: sorted(issue_nums)
+        for path, issue_nums in sorted(file_to_issues.items())
+        if len(issue_nums) >= 2
+    }
+
+
+def _find_dependency_cycles(deps_graph: dict[int, list[int]]) -> list[list[int]]:
+    """Detect strongly connected dependency cycles using Tarjan's algorithm."""
+    index = 0
+    indices: dict[int, int] = {}
+    lowlink: dict[int, int] = {}
+    on_stack: set[int] = set()
+    stack: list[int] = []
+    cycles: list[list[int]] = []
+
+    def strongconnect(node: int) -> None:
+        nonlocal index
+        indices[node] = index
+        lowlink[node] = index
+        index += 1
+        stack.append(node)
+        on_stack.add(node)
+
+        for dep in deps_graph.get(node, []):
+            if dep not in indices:
+                strongconnect(dep)
+                lowlink[node] = min(lowlink[node], lowlink[dep])
+            elif dep in on_stack:
+                lowlink[node] = min(lowlink[node], indices[dep])
+
+        if lowlink[node] == indices[node]:
+            scc: list[int] = []
+            while True:
+                member = stack.pop()
+                on_stack.remove(member)
+                scc.append(member)
+                if member == node:
+                    break
+            if len(scc) > 1 or (len(scc) == 1 and scc[0] in deps_graph.get(scc[0], [])):
+                cycles.append(sorted(scc))
+
+    for node in sorted(deps_graph):
+        if node not in indices:
+            strongconnect(node)
+
+    cycles.sort(key=lambda cycle: cycle[0])
+    return cycles
+
+
+def plan_batch_execution(issues: list[BatchIssue]) -> BatchExecutionPlan:
+    """Compute deterministic topological order, ADR review list, file collisions, and cycles."""
+    if not issues:
+        return BatchExecutionPlan()
+
+    issues_by_num = {issue.number: issue for issue in issues}
+    deps_graph: dict[int, list[int]] = {}
+    in_degree: dict[int, int] = {}
+    dependents: dict[int, list[int]] = {}
+
+    for issue in issues:
+        valid_deps = sorted({dep for dep in issue.depends_on_issues if dep in issues_by_num})
+        deps_graph[issue.number] = valid_deps
+        in_degree[issue.number] = len(valid_deps)
+        for dep in valid_deps:
+            dependents.setdefault(dep, []).append(issue.number)
+
+    dependency_cycles = _find_dependency_cycles(deps_graph)
+
+    heap: list[tuple[int, int]] = []
+    for num in sorted(issues_by_num):
+        if in_degree[num] == 0:
+            heapq.heappush(heap, _issue_priority_key(issues_by_num[num]))
+
+    recommended_order: list[int] = []
+    visited: set[int] = set()
+
+    while len(recommended_order) < len(issues_by_num):
+        if not heap:
+            remaining = [num for num in issues_by_num if num not in visited]
+            next_num = min(
+                remaining,
+                key=lambda num: (in_degree[num], *_issue_priority_key(issues_by_num[num])),
+            )
+            heapq.heappush(heap, _issue_priority_key(issues_by_num[next_num]))
+
+        _, current = heapq.heappop(heap)
+        if current in visited:
+            continue
+        visited.add(current)
+        recommended_order.append(current)
+
+        for dep_num in dependents.get(current, []):
+            if dep_num in visited:
+                continue
+            in_degree[dep_num] -= 1
+            if in_degree[dep_num] <= 0:
+                heapq.heappush(heap, _issue_priority_key(issues_by_num[dep_num]))
+
+    adr_review_issues = [
+        num for num in recommended_order if issues_by_num[num].requires_adr_review
+    ]
+    file_collisions = detect_file_collisions(issues)
+
+    return BatchExecutionPlan(
+        recommended_order=recommended_order,
+        adr_review_issues=adr_review_issues,
+        file_collisions=file_collisions,
+        dependency_cycles=dependency_cycles,
+    )
+
+
 def inspect_batch(
     repo_or_path: str,
     issue_numbers: list[int] | None = None,
@@ -387,6 +517,7 @@ def inspect_batch(
     issues = collect_batch_issues(repo, issue_numbers=issue_numbers, label=label, limit=limit)
     open_prs = collect_open_prs(repo)
     governance_docs = collect_governance_docs(repo, local_path)
+    plan = plan_batch_execution(issues)
 
     return BatchInspectionBundle(
         repo=repo,
@@ -395,4 +526,8 @@ def inspect_batch(
         issues=issues,
         open_prs=open_prs,
         governance_docs=governance_docs,
+        recommended_order=plan.recommended_order,
+        adr_review_issues=plan.adr_review_issues,
+        file_collisions=plan.file_collisions,
+        dependency_cycles=plan.dependency_cycles,
     )

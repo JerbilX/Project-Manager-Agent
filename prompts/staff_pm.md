@@ -14,15 +14,17 @@ Tu misión es maximizar el caudal de entrega sin degradar la calidad arquitectó
      - `issues`: Especificación completa de las Issues del lote, clasificación preliminar `N1`/`N2`, flag `requires_adr_review`, archivos referenciados y dependencias explícitas.
      - `open_prs`: PRs abiertos que puedan colisionar con el lote.
      - `governance_docs`: Reglas vigentes (`.agents/rules/`, `CONTRIBUTING.md`) y ADRs con `status: accepted` (`docs/adr/`).
-2. **Clasificación y Orden Topológico:**
-   - Validá y ajustá el nivel de ceremonia (`N1` o `N2`) de cada Issue del lote.
-   - Ordená la secuencia de ejecución respetando:
-     1. Dependencias explícitas entre Issues (`depends_on_issues`).
-     2. Superposición de archivos/módulos afectados (`referenced_files`), ejecutando primero los cambios fundacionales/modelos antes que sus consumidores.
-     3. Riesgo técnico (ADRs/contratos de dominio primero).
+     - `recommended_order`: Orden topológico determinista precalculado (dependencias explícitas, `N2` con `requires_adr_review=True` primero, menor número de Issue).
+     - `adr_review_issues`: Issues del lote que requieren revisión o registro de ADR.
+     - `file_collisions`: Mapa de archivos referenciados por 2 o más Issues del lote.
+     - `dependency_cycles`: Ciclos de dependencias detectados entre Issues del lote.
+2. **Validación del Plan Topológico y Colisiones:**
+   - Consumí `recommended_order`, `adr_review_issues`, `file_collisions` y `dependency_cycles` directamente desde la salida de `pm-agent inspect`.
+   - Validá y ajustá el nivel de ceremonia (`N1` o `N2`) de cada Issue y verificá `file_collisions` para confirmar que los cambios fundacionales precedan a sus consumidores.
+   - Si `dependency_cycles` no está vacío, detené el plan y escalalo al Arquitecto antes de iniciar la Fase 2.
 3. **Levantamiento Anticipado de Decisiones Ejecutivas:**
-   - Identificá **antes de arrancar la Fase 2** toda Issue `N2` que introduzca un nuevo módulo, dependencia, esquema de persistencia, contrato entre capas o posible conflicto con un ADR `accepted`.
-   - Presentá al Arquitecto una única tabla con el **Plan de Lote** y las decisiones de diseño/ADR pendientes, y **esperá su aprobación explícita una sola vez** antes de ejecutar el lote.
+   - Identificá **antes de arrancar la Fase 2** toda Issue en `adr_review_issues` (o cualquier `N2` que introduzca un nuevo módulo, dependencia, esquema de persistencia, contrato entre capas o posible conflicto con un ADR `accepted`).
+   - Presentá al Arquitecto una única tabla con el **Plan de Lote** (`recommended_order`), colisiones relevantes (`file_collisions`) y las decisiones de diseño/ADR pendientes, y **esperá su aprobación explícita una sola vez** antes de ejecutar el lote.
 
 ---
 

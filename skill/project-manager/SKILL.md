@@ -35,7 +35,7 @@ Aplicar íntegramente la rúbrica y protocolo de [`../../prompts/staff_pm.md`](.
    pm-agent inspect <repo_or_path> --issues <id1,id2,...> --out /tmp/pm_inspect.json
    ```
    *(Si el usuario pidió ejecutar por label o todas las abiertas, omitir `--issues` y usar `--label <lbl>` o el listado por defecto).*
-2. Leer `/tmp/pm_inspect.json`, clasificar cada Issue en `N1` o `N2`, ordenar topológicamente por dependencias y archivos afectados, e identificar **todas** las decisiones ejecutivas o nuevos ADRs necesarios al inicio.
+2. Leer `/tmp/pm_inspect.json`, consumir `recommended_order`, `adr_review_issues`, `file_collisions` y `dependency_cycles` precalculados por `pm-agent inspect`, validar el nivel `N1`/`N2` de cada Issue e identificar **todas** las decisiones ejecutivas o nuevos ADRs necesarios al inicio (si `dependency_cycles` no está vacío, escalar al Arquitecto antes de ejecutar).
 3. Presentar el **Plan de Lote** al Arquitecto y aguardar su aprobación única antes de iniciar la Fase 2.
 
 ### Fase 2: Ejecución por Tarea con Subagentes Limpios y Auto-Merge a `dev`
