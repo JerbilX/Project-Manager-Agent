@@ -1,0 +1,398 @@
+# Ref: docs/adr/0001-arquitectura-orquestador-lotes-mas-cli-determinista.md
+"""Deterministic repository and backlog inspector using `git` and `gh` CLI."""
+
+from __future__ import annotations
+
+import base64
+import json
+import re
+import subprocess
+from pathlib import Path
+from typing import Any
+
+from project_manager.models import (
+    BatchInspectionBundle,
+    BatchIssue,
+    CeremonyLevel,
+    GitWorkspaceStatus,
+    OpenPRInfo,
+)
+
+_REMOTE_RE = re.compile(r"(?:github\.com[:/])([^/]+/[^/]+?)(?:\.git)?/?$")
+_REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_FILE_PATH_RE = re.compile(
+    r"(?:`|\b)((?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]+|"
+    r"README\.md|CONTRIBUTING\.md|pyproject\.toml|Makefile|Dockerfile)(?:`|\b)"
+)
+_DEPENDS_RE = re.compile(
+    r"(?:depends?\s+on|depende\s+de|after|requires|requiere|blocked\s+by|bloquead[oa]\s+por)"
+    r"\s+#(\d+)",
+    re.IGNORECASE,
+)
+_ADR_KEYWORDS_RE = re.compile(
+    r"\b(?:adr|docs/adr|arquitectura|architecture|persistencia|persistence|schema|esquema|"
+    r"migraci[oó]n|migration|breaking\s+change|nuevo\s+m[oó]dulo|new\s+module)\b",
+    re.IGNORECASE,
+)
+_N2_SECTION_RE = re.compile(r"###\s+Objetivos\s+T[eé]cnicos", re.IGNORECASE)
+
+
+class InspectorError(RuntimeError):
+    """Raised when `git` or `gh` fails to inspect the repository or backlog."""
+
+
+def run_cmd(
+    cmd: list[str],
+    cwd: Path | None = None,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """Execute a subprocess command and return the completed process."""
+    result = subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if check and result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip()
+        raise InspectorError(f"Command failed ({' '.join(cmd)}): {stderr}")
+    return result
+
+
+def parse_github_repo_from_remote(remote_url: str) -> str | None:
+    """Extract `owner/repo` from a GitHub HTTPS or SSH remote URL."""
+    match = _REMOTE_RE.search(remote_url.strip())
+    return match.group(1) if match else None
+
+
+def resolve_repo(repo_or_path: str) -> tuple[str, Path | None]:
+    """Resolve an `owner/repo` slug and optional local repository path."""
+    candidate = Path(repo_or_path).expanduser()
+    if candidate.exists() and candidate.is_dir():
+        local_path = candidate.resolve()
+        remote_res = run_cmd(["git", "remote", "get-url", "origin"], cwd=local_path, check=False)
+        if remote_res.returncode == 0:
+            parsed = parse_github_repo_from_remote(remote_res.stdout)
+            if parsed:
+                return parsed, local_path
+        gh_res = run_cmd(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+            cwd=local_path,
+            check=False,
+        )
+        if gh_res.returncode == 0 and gh_res.stdout.strip():
+            return gh_res.stdout.strip(), local_path
+        raise InspectorError(f"Could not resolve GitHub repository from local path: {local_path}")
+
+    slug = repo_or_path.strip()
+    if not _REPO_SLUG_RE.match(slug):
+        raise InspectorError(
+            f"Invalid repository identifier (expected owner/repo or local path): {repo_or_path}"
+        )
+    return slug, None
+
+
+def parse_issue_list_arg(raw_issues: str | None) -> list[int]:
+    """Parse a comma-separated string of issue numbers (e.g. '4,5,6') into unique ints."""
+    if not raw_issues or not raw_issues.strip():
+        return []
+    result: list[int] = []
+    seen: set[int] = set()
+    for token in raw_issues.split(","):
+        cleaned = token.strip().lstrip("#")
+        if not cleaned:
+            continue
+        if not cleaned.isdigit() or int(cleaned) <= 0:
+            raise InspectorError(f"Invalid issue number in list: '{token.strip()}'")
+        num = int(cleaned)
+        if num not in seen:
+            seen.add(num)
+            result.append(num)
+    return result
+
+
+def collect_git_workspace_status(local_path: Path, fetch: bool = True) -> GitWorkspaceStatus:
+    """Inspect local Git branch, working tree cleanliness, and sync with `origin/dev`."""
+    if fetch:
+        run_cmd(["git", "fetch", "--prune", "origin"], cwd=local_path, check=False)
+
+    branch_res = run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=local_path)
+    branch = branch_res.stdout.strip()
+
+    status_res = run_cmd(["git", "status", "--porcelain"], cwd=local_path)
+    dirty_lines = [line.strip() for line in status_res.stdout.splitlines() if line.strip()]
+    is_clean = len(dirty_lines) == 0
+
+    head_res = run_cmd(["git", "rev-parse", "HEAD"], cwd=local_path, check=False)
+    head_sha = head_res.stdout.strip() if head_res.returncode == 0 else ""
+
+    origin_dev_res = run_cmd(["git", "rev-parse", "origin/dev"], cwd=local_path, check=False)
+    origin_dev_sha = origin_dev_res.stdout.strip() if origin_dev_res.returncode == 0 else ""
+
+    synced = bool(branch == "dev" and head_sha and origin_dev_sha and head_sha == origin_dev_sha)
+
+    return GitWorkspaceStatus(
+        branch=branch,
+        is_clean=is_clean,
+        synced_with_origin_dev=synced,
+        head_sha=head_sha,
+        origin_dev_sha=origin_dev_sha,
+        dirty_files=dirty_lines,
+    )
+
+
+def classify_issue(
+    number: int,
+    title: str,
+    body: str,
+    labels: list[str],
+) -> tuple[CeremonyLevel, bool, list[str], list[int]]:
+    """Derive preliminary ceremony level (N1/N2), ADR requirement, files, and dependencies."""
+    combined = f"{title}\n{body}"
+    lower_labels = {lbl.lower() for lbl in labels}
+
+    referenced_files: list[str] = []
+    seen_files: set[str] = set()
+    for match in _FILE_PATH_RE.finditer(combined):
+        path_str = match.group(1).strip("`.,:;()[]")
+        if path_str and path_str not in seen_files:
+            seen_files.add(path_str)
+            referenced_files.append(path_str)
+
+    depends_on: list[int] = []
+    seen_deps: set[int] = set()
+    for match in _DEPENDS_RE.finditer(combined):
+        dep_num = int(match.group(1))
+        if dep_num != number and dep_num not in seen_deps:
+            seen_deps.add(dep_num)
+            depends_on.append(dep_num)
+
+    requires_adr = bool(
+        _ADR_KEYWORDS_RE.search(combined)
+        or any(lbl in {"adr", "architecture", "arquitectura", "n2"} for lbl in lower_labels)
+        or any(path.startswith("docs/adr/") for path in referenced_files)
+    )
+
+    is_n2 = bool(
+        requires_adr
+        or "n2" in lower_labels
+        or _N2_SECTION_RE.search(body or "")
+        or title.lower().startswith("feat")
+    )
+    if "n1" in lower_labels and not requires_adr:
+        is_n2 = False
+
+    ceremony = CeremonyLevel.N2 if is_n2 else CeremonyLevel.N1
+    return ceremony, requires_adr, referenced_files, depends_on
+
+
+def _build_batch_issue(data: dict[str, Any]) -> BatchIssue:
+    """Construct a `BatchIssue` from `gh issue` JSON data."""
+    num = int(data["number"])
+    title = data.get("title", "") or ""
+    body = data.get("body", "") or ""
+    state = data.get("state", "") or ""
+    url = data.get("url", "") or ""
+    raw_labels = data.get("labels") or []
+    labels = [
+        lbl.get("name", "") if isinstance(lbl, dict) else str(lbl)
+        for lbl in raw_labels
+        if (lbl.get("name") if isinstance(lbl, dict) else lbl)
+    ]
+    ceremony, requires_adr, files, depends_on = classify_issue(num, title, body, labels)
+    return BatchIssue(
+        number=num,
+        title=title,
+        body=body,
+        state=state,
+        url=url,
+        labels=labels,
+        suggested_ceremony=ceremony,
+        requires_adr_review=requires_adr,
+        referenced_files=files,
+        depends_on_issues=depends_on,
+    )
+
+
+def collect_batch_issues(
+    repo: str,
+    issue_numbers: list[int] | None = None,
+    label: str | None = None,
+    limit: int = 30,
+) -> list[BatchIssue]:
+    """Collect target batch issues either by explicit IDs or open backlog listing."""
+    if issue_numbers:
+        issues: list[BatchIssue] = []
+        for num in issue_numbers:
+            res = run_cmd(
+                [
+                    "gh",
+                    "issue",
+                    "view",
+                    str(num),
+                    "--repo",
+                    repo,
+                    "--json",
+                    "number,title,body,state,url,labels",
+                ]
+            )
+            data = json.loads(res.stdout)
+            issues.append(_build_batch_issue(data))
+        return issues
+
+    cmd = [
+        "gh",
+        "issue",
+        "list",
+        "--repo",
+        repo,
+        "--state",
+        "open",
+        "--limit",
+        str(limit),
+        "--json",
+        "number,title,body,state,url,labels",
+    ]
+    if label:
+        cmd.extend(["--label", label])
+
+    res = run_cmd(cmd)
+    raw_list = json.loads(res.stdout) if res.stdout.strip() else []
+    issues = [_build_batch_issue(item) for item in raw_list]
+    issues.sort(key=lambda item: item.number)
+    return issues
+
+
+def collect_open_prs(repo: str) -> list[OpenPRInfo]:
+    """Collect currently open Pull Requests in the repository."""
+    res = run_cmd(
+        [
+            "gh",
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--json",
+            "number,title,state,baseRefName,headRefName,url",
+        ],
+        check=False,
+    )
+    if res.returncode != 0 or not res.stdout.strip():
+        return []
+    try:
+        raw_prs = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return []
+    return [
+        OpenPRInfo(
+            number=int(item["number"]),
+            title=item.get("title", "") or "",
+            state=item.get("state", "") or "",
+            base_ref=item.get("baseRefName", "") or "",
+            head_ref=item.get("headRefName", "") or "",
+            url=item.get("url", "") or "",
+        )
+        for item in raw_prs
+    ]
+
+
+def should_include_adr(content: str) -> bool:
+    """Include ADRs unless explicitly marked rejected or superseded in frontmatter."""
+    if not content.startswith("---"):
+        return True
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return True
+    frontmatter = parts[1].lower()
+    for line in frontmatter.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("status:"):
+            status_val = stripped.split(":", 1)[1].strip()
+            if status_val.startswith("rejected") or status_val.startswith("superseded"):
+                return False
+    return True
+
+
+def _read_remote_file_or_dir(repo: str, path: str, ref: str) -> dict[str, str]:
+    """Fetch a file or markdown files in a directory from GitHub Contents API."""
+    endpoint = f"repos/{repo}/contents/{path}?ref={ref}"
+    res = run_cmd(["gh", "api", endpoint], check=False)
+    if res.returncode != 0:
+        return {}
+
+    try:
+        payload: Any = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return {}
+
+    docs: dict[str, str] = {}
+    if isinstance(payload, dict) and payload.get("type") == "file" and payload.get("content"):
+        decoded = base64.b64decode(payload["content"]).decode("utf-8", errors="replace")
+        docs[path] = decoded
+    elif isinstance(payload, list):
+        for entry in sorted(payload, key=lambda item: item.get("name", "")):
+            name = entry.get("name", "")
+            entry_path = entry.get("path", "")
+            if entry.get("type") == "file" and name.endswith(".md") and entry_path:
+                docs.update(_read_remote_file_or_dir(repo, entry_path, ref))
+    return docs
+
+
+def collect_governance_docs(
+    repo: str,
+    local_path: Path | None,
+    ref: str = "dev",
+) -> dict[str, str]:
+    """Collect `CONTRIBUTING.md`, `.agents/rules/`, and active `docs/adr/` documents."""
+    docs: dict[str, str] = {}
+
+    if local_path is not None:
+        contributing = local_path / "CONTRIBUTING.md"
+        if contributing.is_file():
+            docs["CONTRIBUTING.md"] = contributing.read_text(encoding="utf-8", errors="replace")
+
+        for rel_dir in (".agents/rules", "docs/adr"):
+            target_dir = local_path / rel_dir
+            if target_dir.is_dir():
+                for md_file in sorted(target_dir.glob("*.md")):
+                    content = md_file.read_text(encoding="utf-8", errors="replace")
+                    if rel_dir == "docs/adr" and not should_include_adr(content):
+                        continue
+                    docs[f"{rel_dir}/{md_file.name}"] = content
+        return docs
+
+    for target in ("CONTRIBUTING.md", ".agents/rules", "docs/adr"):
+        fetched = _read_remote_file_or_dir(repo, target, ref)
+        for doc_path, content in fetched.items():
+            if doc_path.startswith("docs/adr/") and not should_include_adr(content):
+                continue
+            docs[doc_path] = content
+
+    return docs
+
+
+def inspect_batch(
+    repo_or_path: str,
+    issue_numbers: list[int] | None = None,
+    label: str | None = None,
+    limit: int = 30,
+    fetch: bool = True,
+) -> BatchInspectionBundle:
+    """Collect full deterministic context for Phase 1 batch triage and planning."""
+    repo, local_path = resolve_repo(repo_or_path)
+    git_status = collect_git_workspace_status(local_path, fetch=fetch) if local_path else None
+    issues = collect_batch_issues(repo, issue_numbers=issue_numbers, label=label, limit=limit)
+    open_prs = collect_open_prs(repo)
+    governance_docs = collect_governance_docs(repo, local_path)
+
+    return BatchInspectionBundle(
+        repo=repo,
+        local_path=str(local_path) if local_path else None,
+        git_status=git_status,
+        issues=issues,
+        open_prs=open_prs,
+        governance_docs=governance_docs,
+    )
