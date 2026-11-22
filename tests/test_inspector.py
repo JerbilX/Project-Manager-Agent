@@ -16,13 +16,15 @@ from project_manager.inspector import (
     collect_batch_issues,
     collect_git_workspace_status,
     collect_governance_docs,
+    detect_file_collisions,
     inspect_batch,
     parse_github_repo_from_remote,
     parse_issue_list_arg,
+    plan_batch_execution,
     resolve_repo,
     should_include_adr,
 )
-from project_manager.models import CeremonyLevel
+from project_manager.models import BatchIssue, CeremonyLevel
 
 
 def _proc(stdout: str = "", returncode: int = 0, stderr: str = "") -> subprocess.CompletedProcess[str]:
@@ -202,6 +204,87 @@ class TestInspectorCollection(unittest.TestCase):
         self.assertEqual(bundle.issues[0].suggested_ceremony, CeremonyLevel.N2)
         self.assertEqual(len(bundle.open_prs), 1)
         self.assertEqual(bundle.open_prs[0].number, 5)
+        self.assertEqual(bundle.recommended_order, [2])
+        self.assertEqual(bundle.adr_review_issues, [])
+        self.assertEqual(bundle.file_collisions, {})
+        self.assertEqual(bundle.dependency_cycles, [])
+
+
+class TestBatchPlanning(unittest.TestCase):
+    """Tests for deterministic topological sorting, ADR priority, cycles, and file collisions."""
+
+    @staticmethod
+    def _issue(
+        number: int,
+        ceremony: CeremonyLevel = CeremonyLevel.N1,
+        requires_adr: bool = False,
+        files: list[str] | None = None,
+        deps: list[int] | None = None,
+    ) -> BatchIssue:
+        return BatchIssue(
+            number=number,
+            title=f"Issue #{number}",
+            body="",
+            state="OPEN",
+            url=f"https://github.com/JerbilX/Repo/issues/{number}",
+            suggested_ceremony=ceremony,
+            requires_adr_review=requires_adr,
+            referenced_files=files or [],
+            depends_on_issues=deps or [],
+        )
+
+    def test_topological_order_chained_dependencies_and_external_deps(self) -> None:
+        issues = [
+            self._issue(1, deps=[2]),
+            self._issue(2, deps=[3, 999]),  # 999 is outside batch
+            self._issue(3),
+        ]
+        plan = plan_batch_execution(issues)
+        self.assertEqual(plan.recommended_order, [3, 2, 1])
+        self.assertEqual(plan.dependency_cycles, [])
+
+    def test_prioritizes_n2_adr_review_and_lowest_issue_tiebreak(self) -> None:
+        issues = [
+            self._issue(2, ceremony=CeremonyLevel.N1, requires_adr=False),
+            self._issue(5, ceremony=CeremonyLevel.N2, requires_adr=False),
+            self._issue(8, ceremony=CeremonyLevel.N2, requires_adr=True),
+            self._issue(4, ceremony=CeremonyLevel.N2, requires_adr=True, deps=[2]),
+            self._issue(1, ceremony=CeremonyLevel.N1, requires_adr=False),
+        ]
+        plan = plan_batch_execution(issues)
+        # 8 is ready N2+ADR -> first; then ready N1s in order 1, 2; 2 unlocks 4 (N2+ADR) before 5
+        self.assertEqual(plan.recommended_order, [8, 1, 2, 4, 5])
+        self.assertEqual(plan.adr_review_issues, [8, 4])
+
+    def test_detects_dependency_cycles(self) -> None:
+        issues = [
+            self._issue(10, deps=[11]),
+            self._issue(11, deps=[12]),
+            self._issue(12, deps=[10]),
+            self._issue(15, deps=[12]),
+            self._issue(1),
+        ]
+        plan = plan_batch_execution(issues)
+        self.assertEqual(plan.dependency_cycles, [[10, 11, 12]])
+        self.assertEqual(plan.recommended_order[0], 1)
+        self.assertEqual(set(plan.recommended_order), {1, 10, 11, 12, 15})
+
+    def test_detect_file_collisions(self) -> None:
+        issues = [
+            self._issue(4, files=["src/models.py", "src/inspector.py"]),
+            self._issue(2, files=["src/models.py", "README.md"]),
+            self._issue(7, files=["src/inspector.py", "src/cli.py"]),
+        ]
+        collisions = detect_file_collisions(issues)
+        self.assertEqual(
+            collisions,
+            {
+                "src/inspector.py": [4, 7],
+                "src/models.py": [2, 4],
+            },
+        )
+        plan = plan_batch_execution(issues)
+        self.assertEqual(plan.file_collisions, collisions)
 
 
 if __name__ == "__main__":
