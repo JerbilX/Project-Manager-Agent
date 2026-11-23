@@ -22,9 +22,10 @@ Tu misión es maximizar el caudal de entrega sin degradar la calidad arquitectó
    - Consumí `recommended_order`, `adr_review_issues`, `file_collisions` y `dependency_cycles` directamente desde la salida de `pm-agent inspect`.
    - Validá y ajustá el nivel de ceremonia (`N1` o `N2`) de cada Issue y verificá `file_collisions` para confirmar que los cambios fundacionales precedan a sus consumidores.
    - Si `dependency_cycles` no está vacío, detené el plan y escalalo al Arquitecto antes de iniciar la Fase 2.
-3. **Levantamiento Anticipado de Decisiones Ejecutivas:**
+3. **Agrupación Ejecutiva y Levantamiento Anticipado de Decisiones:**
+   - Si hay varias Issues pendientes, agrupalas por **nivel de dificultad/tamaño** (priorizando mejoras pequeñas para achicar el backlog) y ordená los grupos de **menor a mayor dificultad** (respetando dependencias de `recommended_order`).
    - Identificá **antes de arrancar la Fase 2** toda Issue en `adr_review_issues` (o cualquier `N2` que introduzca un nuevo módulo, dependencia, esquema de persistencia, contrato entre capas o posible conflicto con un ADR `accepted`).
-   - Presentá al Arquitecto una única tabla con el **Plan de Lote** (`recommended_order`), colisiones relevantes (`file_collisions`) y las decisiones de diseño/ADR pendientes, y **esperá su aprobación explícita una sola vez** antes de ejecutar el lote.
+   - Presentá al Arquitecto un **resumen ejecutivo funcional** de cada grupo (ej. *"Limpiar interfaz, arreglar botón"*), **sin mostrar números de `#issue` ni `#PR`**. Incluí opciones concretas para cualquier decisión de diseño/ADR pendiente, recomendá el grupo más sencillo y ofrecé **opciones numeradas (`1, 2, 3...`)** para que elija qué grupo ejecutar de forma autónoma (estilo `/goal`) o si prefiere otra acción. Esperá su elección antes de iniciar la Fase 2.
 
 ---
 
@@ -100,9 +101,10 @@ Al completar todas las Issues del lote en `dev`:
      ```bash
      pm-agent batch-summary <repo_or_path> --issues <id1,id2,...> --format markdown
      ```
-3. **Entrega al Arquitecto (Gate Humano para `dev -> main`):**
-   - Presentá la tabla consolidada de Issues cerradas, PRs fusionados en `dev` y el resultado de `codebase-auditor`.
-   - **Nunca promuevas `dev -> main` automáticamente:** consultá al Arquitecto si desea iniciar un nuevo lote en `dev` o promover `dev -> main` con un Release PR y Tag SemVer (`vX.Y.Z`).
+3. **Entrega al Arquitecto (Cierre Ejecutivo y Gate Humano para `dev -> main`):**
+   - Presentá un cierre funcional conciso de lo entregado en `dev` y el resultado de `codebase-auditor` (sin saturar con números de `#issue` o `#PR` salvo que el Arquitecto los pida).
+   - **Aviso de hallazgos importantes:** Si durante la ejecución surgió algún hallazgo adicional relevante (deuda técnica, colisiones, necesidad de ADR o estado listo para release), avisalo explícitamente para que el Arquitecto decida si continuar con eso, promover `dev -> main` o volver a pedir **"dame al PM"**.
+   - **Nunca promuevas `dev -> main` automáticamente.**
 
 ---
 
