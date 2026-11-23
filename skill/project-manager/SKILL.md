@@ -29,14 +29,14 @@ PYTHONPATH="$HOME/Proyectos-IA-V3/Project-Manager-Agent/src" python3 -m project_
 
 Aplicar íntegramente la rúbrica y protocolo de [`../../prompts/staff_pm.md`](../../prompts/staff_pm.md):
 
-### Fase 1: Triage Determinista y Plan de Lote (*Front-Loading Executive Decisions*)
+### Fase 1: Triage Determinista y Plan Ejecutivo (*Front-Loading Executive Decisions*)
 1. Recolectar el estado del repositorio, las Issues objetivo, los PRs abiertos y la gobernanza vigente (`docs/adr/`, `.agents/rules/`, `CONTRIBUTING.md`):
    ```bash
    pm-agent inspect <repo_or_path> --issues <id1,id2,...> --out /tmp/pm_inspect.json
    ```
-   *(Si el usuario pidió ejecutar por label o todas las abiertas, omitir `--issues` y usar `--label <lbl>` o el listado por defecto).*
+   *(Si el usuario pidió ejecutar por label, todas las abiertas o invocó **"dame al PM"**, omitir `--issues` y usar `--label <lbl>` o el listado por defecto).*
 2. Leer `/tmp/pm_inspect.json`, consumir `recommended_order`, `adr_review_issues`, `file_collisions` y `dependency_cycles` precalculados por `pm-agent inspect`, validar el nivel `N1`/`N2` de cada Issue e identificar **todas** las decisiones ejecutivas o nuevos ADRs necesarios al inicio (si `dependency_cycles` no está vacío, escalar al Arquitecto antes de ejecutar).
-3. Presentar el **Plan de Lote** al Arquitecto y aguardar su aprobación única antes de iniciar la Fase 2.
+3. **Agrupación por Dificultad y Opciones Numeradas:** Si hay varias Issues pendientes, separarlas en grupos por nivel de dificultad/tamaño (priorizando mejoras pequeñas para achicar el backlog) y ordenarlos de menor a mayor dificultad. Presentar al Arquitecto un resumen funcional corto por grupo (**sin mostrar números de `#issue` ni `#PR`**), incluyendo opciones breves para cualquier decisión de diseño/ADR necesaria, recomendar el grupo más sencillo y ofrecer **opciones numeradas (`1, 2, 3...`)** para elegir qué grupo ejecutar (o realizar otra acción) de forma autónoma (estilo `/goal`). Aguardar su elección antes de iniciar la Fase 2.
 
 ### Fase 2: Ejecución por Tarea con Subagentes Limpios y Auto-Merge a `dev`
 Por cada Issue `#<id>` en el orden aprobado del Plan de Lote:
@@ -79,7 +79,7 @@ Por cada Issue `#<id>` en el orden aprobado del Plan de Lote:
    ```bash
    pm-agent batch-summary <repo_or_path> --issues <id1,id2,...> --format markdown
    ```
-3. Limpiar archivos temporales en `/tmp/` (`rm -f /tmp/pm_inspect.json /tmp/pm_batch_audit.json`) y presentar el reporte ejecutivo al Arquitecto para que decida si promueve `dev -> main`.
+3. Limpiar archivos temporales en `/tmp/` (`rm -f /tmp/pm_inspect.json /tmp/pm_batch_audit.json`) y presentar un cierre ejecutivo conciso al Arquitecto (sin saturar con IDs internos), avisando cualquier hallazgo adicional importante detectado durante el lote para que decida si continuar con ello, promover `dev -> main` o volver a pedir **"dame al PM"**.
 
 ---
 
