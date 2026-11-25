@@ -24,7 +24,7 @@ class ModelProfile(StrEnum):
 
 
 DEFAULT_RECOMMENDED_MODELS: dict[ModelProfile, str] = {
-    ModelProfile.FAST: "Flash",
+    ModelProfile.FAST: "Gemini 4 Hydrogen Medium",
     ModelProfile.BALANCED: "Gemini 4 Carbon Medium",
     ModelProfile.DEEP: "Neon High / Pro",
 }

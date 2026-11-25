@@ -39,11 +39,48 @@ _ADR_KEYWORDS_RE = re.compile(
     r"migraci[oó]n|migration|breaking\s+change|nuevo\s+m[oó]dulo|new\s+module)\b",
     re.IGNORECASE,
 )
+_NEGATED_ADR_ES_RE = re.compile(
+    r"\b(?:sin|no\s+(?:requiere|necesita|implica|hay|afecta|toca))\s+"
+    r"(?:cambios?\s+(?:de|en)\s+|necesidad\s+de\s+|requerir\s+|nuevo\s+|una?\s+|la\s+|el\s+){0,3}"
+    r"(?:adr(?:s)?|docs/adr(?:/[^\s`)]*)?|arquitectura|persistencia|esquema|"
+    r"migraci[oó]n(?:es)?|breaking\s+change|nuevo\s+m[oó]dulo)"
+    r"(?:\s*(?:,|y|o|ni)\s+(?:de\s+|en\s+)?(?:adr(?:s)?|docs/adr(?:/[^\s`)]*)?|arquitectura|"
+    r"persistencia|esquema|migraci[oó]n(?:es)?|breaking\s+change|nuevo\s+m[oó]dulo))*\b",
+    re.IGNORECASE,
+)
+_NEGATED_ADR_EN_RE = re.compile(
+    r"\b(?:without|no|does\s+not\s+require|doesn't\s+require|not\s+requiring)\s+"
+    r"(?:any\s+|an?\s+|the\s+|new\s+)?(?:(?:schema|persistence|architecture|architectural|"
+    r"adr|breaking|migration)\s+){0,2}"
+    r"(?:changes?|updates?|modifications?|needed|required|adr|docs/adr(?:/[^\s`)]*)?|"
+    r"schema|persistence|architecture|migration|new\s+module)"
+    r"(?:\s*(?:,|and|or)\s+(?:schema|persistence|architecture|adr|migration|changes?))*\b",
+    re.IGNORECASE,
+)
+_PRESERVED_ADR_RE = re.compile(
+    r"\b(?:preserving|preserve|respecting|respect|following|follow|honoring|according\s+to|"
+    r"compatible\s+with|respetando|preservando|manteniendo|siguiendo|conforme\s+a|seg[uú]n)\s+"
+    r"(?:(?:el|la|los|las|the|existing|current|vigente(?:s)?)\s+){0,2}"
+    r"(?:adr(?:-\d+|\s*#?\d+)?|docs/adr(?:/[^\s`)]*)?)\b",
+    re.IGNORECASE,
+)
+_ANALYSIS_TITLE_RE = re.compile(
+    r"\b(?:analyze|analizar|analysis|an[aá]lisis)\b",
+    re.IGNORECASE,
+)
 _N2_SECTION_RE = re.compile(r"###\s+Objetivos\s+T[eé]cnicos", re.IGNORECASE)
 _FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
 _CEREMONY_LINE_RE = re.compile(
     r"^\s*(?:[-*+>]\s+)?(?:\*\*|__|\*|_)?ceremon(?:y|ia)(?:\*\*|__|\*|_)?\s*:"
     r"\s*(?:\*\*|__|\*|_)?\s*[`*_]*(n1|n2)\b[`*_]*(?:[\s(].*)?$",
+    re.IGNORECASE,
+)
+_LEGACY_CEREMONY_HEADING_RE = re.compile(
+    r"^\s*#{1,6}\s+nivel\s+estimado\b(.*)$",
+    re.IGNORECASE,
+)
+_LEGACY_CEREMONY_VALUE_RE = re.compile(
+    r"^\s*(?:[-*+>]\s+)?[`*_]*(n1|n2)\b[`*_]*(?:[\s(–—:-].*)?$",
     re.IGNORECASE,
 )
 _MODEL_LINE_RE = re.compile(
@@ -170,12 +207,33 @@ def _iter_non_fenced_lines(text: str) -> Iterator[str]:
 
 
 def parse_ceremony_header(body: str) -> CeremonyLevel | None:
-    """Extract explicit `**Ceremony:** <N1|N2>` metadata from an issue body if present."""
+    """Extract explicit `**Ceremony:** <N1|N2>` or legacy `## Nivel Estimado` metadata."""
+    legacy_ceremony: CeremonyLevel | None = None
+    expect_legacy_value = False
     for line in _iter_non_fenced_lines(body or ""):
         match = _CEREMONY_LINE_RE.match(line)
         if match:
             return CeremonyLevel(match.group(1).upper())
-    return None
+
+        if expect_legacy_value:
+            if not line.strip():
+                continue
+            val_match = _LEGACY_CEREMONY_VALUE_RE.match(line)
+            if val_match and legacy_ceremony is None:
+                legacy_ceremony = CeremonyLevel(val_match.group(1).upper())
+            expect_legacy_value = False
+
+        heading_match = _LEGACY_CEREMONY_HEADING_RE.match(line)
+        if heading_match and legacy_ceremony is None:
+            tail = heading_match.group(1).strip().lstrip(":").strip()
+            if tail:
+                val_match = _LEGACY_CEREMONY_VALUE_RE.match(tail)
+                if val_match:
+                    legacy_ceremony = CeremonyLevel(val_match.group(1).upper())
+            else:
+                expect_legacy_value = True
+
+    return legacy_ceremony
 
 
 def parse_model_header(body: str) -> tuple[ModelProfile, str] | None:
@@ -198,23 +256,26 @@ def parse_model_header(body: str) -> tuple[ModelProfile, str] | None:
     return None
 
 
+def _strip_negated_and_preserved_adr_mentions(text: str) -> str:
+    """Remove negated ADR/schema/persistence phrases and ADR preservation references."""
+    cleaned = _NEGATED_ADR_ES_RE.sub(" ", text)
+    cleaned = _NEGATED_ADR_EN_RE.sub(" ", cleaned)
+    cleaned = _PRESERVED_ADR_RE.sub(" ", cleaned)
+    return cleaned
+
+
 def resolve_issue_model(
     body: str,
     ceremony: CeremonyLevel,
     requires_adr_review: bool,
 ) -> tuple[ModelProfile, str]:
-    """Resolve `model_profile` and `recommended_model` from `**Model:**` or fallback."""
+    """Resolve `model_profile` and `recommended_model` from `**Model:**` or Hydrogen-First fallback."""
     explicit = parse_model_header(body)
     if explicit is not None:
         return explicit
 
-    if requires_adr_review:
-        profile = ModelProfile.DEEP
-    elif ceremony == CeremonyLevel.N2:
-        profile = ModelProfile.BALANCED
-    else:
-        profile = ModelProfile.FAST
-
+    del ceremony  # Ceremony != Model under Hydrogen-First routing
+    profile = ModelProfile.BALANCED if requires_adr_review else ModelProfile.FAST
     return profile, DEFAULT_RECOMMENDED_MODELS[profile]
 
 
@@ -245,18 +306,19 @@ def classify_issue(
             seen_deps.add(dep_num)
             depends_on.append(dep_num)
 
+    adr_text = _strip_negated_and_preserved_adr_mentions(combined)
     requires_adr = bool(
-        _ADR_KEYWORDS_RE.search(combined)
+        _ADR_KEYWORDS_RE.search(adr_text)
         or any(lbl in {"adr", "architecture", "arquitectura", "n2"} for lbl in lower_labels)
-        or any(path.startswith("docs/adr/") for path in referenced_files)
     )
 
+    is_feat_title = title.lower().startswith("feat") and not _ANALYSIS_TITLE_RE.search(title)
     is_n2 = bool(
         explicit_ceremony == CeremonyLevel.N2
         or requires_adr
         or "n2" in lower_labels
         or _N2_SECTION_RE.search(body or "")
-        or title.lower().startswith("feat")
+        or is_feat_title
     )
     if (explicit_ceremony == CeremonyLevel.N1 or "n1" in lower_labels) and not requires_adr:
         is_n2 = False

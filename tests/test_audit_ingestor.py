@@ -102,7 +102,7 @@ class TestAuditIngestor(unittest.TestCase):
         title, body, labels = build_finding_issue_payload(finding)
         self.assertEqual(title, "refactor: atender hallazgo AUD-099 en my_func")
         self.assertIn("**Ceremony:** N1", body)
-        self.assertIn("**Model:** fast (Flash)", body)
+        self.assertIn("**Model:** fast (Gemini 4 Hydrogen Medium)", body)
         self.assertIn("`src/mod.py` (L12-L34)", body)
         self.assertIn("`my_func`", body)
         self.assertEqual(labels, [])
@@ -137,7 +137,7 @@ class TestAuditIngestor(unittest.TestCase):
         _, injected_body, _ = build_finding_issue_payload(ceremony_only_finding)
         self.assertTrue(
             injected_body.startswith(
-                "**Ceremony:** N2\n**Model:** balanced (Gemini 4 Carbon Medium)\n"
+                "**Ceremony:** N2\n**Model:** fast (Gemini 4 Hydrogen Medium)\n"
             )
         )
 
@@ -166,13 +166,13 @@ class TestAuditIngestor(unittest.TestCase):
         self.assertTrue(all(item.issue_number is None for item in report.items))
         self.assertEqual(report.items[0].suggested_ceremony, CeremonyLevel.N2)
         self.assertTrue(report.items[0].requires_adr_review)
-        self.assertEqual(report.items[0].model_profile, ModelProfile.DEEP)
-        self.assertEqual(report.items[0].recommended_model, "Neon High / Pro")
-        self.assertIn("**Model:** deep (Neon High / Pro)", report.items[0].body)
+        self.assertEqual(report.items[0].model_profile, ModelProfile.BALANCED)
+        self.assertEqual(report.items[0].recommended_model, "Gemini 4 Carbon Medium")
+        self.assertIn("**Model:** balanced (Gemini 4 Carbon Medium)", report.items[0].body)
         self.assertIn("src/project_manager/inspector.py", report.items[0].referenced_files)
         self.assertEqual(report.items[1].suggested_ceremony, CeremonyLevel.N1)
         self.assertEqual(report.items[1].model_profile, ModelProfile.FAST)
-        self.assertEqual(report.items[1].recommended_model, "Flash")
+        self.assertEqual(report.items[1].recommended_model, "Gemini 4 Hydrogen Medium")
         self.assertEqual(report.created_issue_numbers, [])
         self.assertEqual(report.recommended_order, [])
 
@@ -223,11 +223,11 @@ class TestAuditIngestor(unittest.TestCase):
         self.assertEqual(report.adr_review_issues, [21])
         self.assertEqual(
             [item["model_profile"] for item in report.to_dict()["items"]],
-            ["deep", "fast", "fast"],
+            ["balanced", "fast", "fast"],
         )
         first_gh_cmd = mock_run.call_args_list[0].args[0]
         body_arg = first_gh_cmd[first_gh_cmd.index("--body") + 1]
-        self.assertIn("**Model:** deep (Neon High / Pro)", body_arg)
+        self.assertIn("**Model:** balanced (Gemini 4 Carbon Medium)", body_arg)
         self.assertEqual(
             report.file_collisions,
             {"src/project_manager/inspector.py": [21, 22]},

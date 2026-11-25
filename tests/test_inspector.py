@@ -109,7 +109,7 @@ class TestInspectorHelpers(unittest.TestCase):
         )
         self.assertEqual(
             parse_model_header("__Model:__ fast ()"),
-            (ModelProfile.FAST, "Flash"),
+            (ModelProfile.FAST, "Gemini 4 Hydrogen Medium"),
         )
         self.assertEqual(
             parse_model_header("*Model:* deep — Neon High / Pro"),
@@ -140,14 +140,23 @@ class TestInspectorHelpers(unittest.TestCase):
     def test_resolve_issue_model_fallbacks_and_override(self) -> None:
         self.assertEqual(
             resolve_issue_model("Sin metadato", CeremonyLevel.N1, requires_adr_review=False),
-            (ModelProfile.FAST, "Flash"),
+            (ModelProfile.FAST, "Gemini 4 Hydrogen Medium"),
         )
         self.assertEqual(
             resolve_issue_model("Sin metadato", CeremonyLevel.N2, requires_adr_review=False),
-            (ModelProfile.BALANCED, "Gemini 4 Carbon Medium"),
+            (ModelProfile.FAST, "Gemini 4 Hydrogen Medium"),
         )
         self.assertEqual(
             resolve_issue_model("Sin metadato", CeremonyLevel.N2, requires_adr_review=True),
+            (ModelProfile.BALANCED, "Gemini 4 Carbon Medium"),
+        )
+        # Explicit **Model:** deep still works; heuristic never auto-assigns deep
+        self.assertEqual(
+            resolve_issue_model(
+                "**Model:** deep (Neon High / Pro)\nCambio estructural complejo",
+                CeremonyLevel.N2,
+                requires_adr_review=True,
+            ),
             (ModelProfile.DEEP, "Neon High / Pro"),
         )
         # Explicit **Model:** overrides heuristic ADR fallback (e.g. referencing an existing ADR)
@@ -159,6 +168,38 @@ class TestInspectorHelpers(unittest.TestCase):
             ),
             (ModelProfile.BALANCED, "Gemini 4 Carbon Medium"),
         )
+
+    def test_classify_issue_negated_and_preserved_adr_and_legacy_headers(self) -> None:
+        # Negated Spanish/English ADR mentions and preserved ADR references should not trigger ADR review
+        ceremony_es, adr_es, _, _ = classify_issue(
+            11,
+            "fix(ui): ajustar layout",
+            "Cambio visual sin cambios de esquema ni persistencia. No requiere ADR. "
+            "Respetando ADR-0005 y preservando docs/adr/0005-ui.md.",
+            [],
+        )
+        self.assertEqual(ceremony_es, CeremonyLevel.N1)
+        self.assertFalse(adr_es)
+
+        ceremony_en, adr_en, _, _ = classify_issue(
+            12,
+            "feat(inspector): analyze backlog flags",
+            "## Nivel Estimado\n`N1`\n\n"
+            "Pure analysis without schema changes and without persistence changes, "
+            "preserving ADR-0001.",
+            [],
+        )
+        self.assertEqual(ceremony_en, CeremonyLevel.N1)
+        self.assertFalse(adr_en)
+
+        ceremony_legacy_n2, adr_legacy_n2, _, _ = classify_issue(
+            13,
+            "refactor(core): limpiar helpers",
+            "## Nivel Estimado\n`N2` — Refactor multiarchivo sin cambios de arquitectura.",
+            [],
+        )
+        self.assertEqual(ceremony_legacy_n2, CeremonyLevel.N2)
+        self.assertFalse(adr_legacy_n2)
 
 
 class TestInspectorCollection(unittest.TestCase):
@@ -224,7 +265,7 @@ class TestInspectorCollection(unittest.TestCase):
         self.assertEqual(issues[0].number, 4)
         self.assertEqual(issues[0].suggested_ceremony, CeremonyLevel.N1)
         self.assertEqual(issues[0].model_profile, ModelProfile.FAST)
-        self.assertEqual(issues[0].recommended_model, "Flash")
+        self.assertEqual(issues[0].recommended_model, "Gemini 4 Hydrogen Medium")
 
         mock_run.return_value = _proc(json.dumps([issue_4]))
         listed = collect_batch_issues("JerbilX/Repo", issue_numbers=None, label="n1")
@@ -277,11 +318,11 @@ class TestInspectorCollection(unittest.TestCase):
         self.assertEqual(bundle.repo, "JerbilX/Project-Manager-Agent")
         self.assertEqual(len(bundle.issues), 1)
         self.assertEqual(bundle.issues[0].suggested_ceremony, CeremonyLevel.N2)
-        self.assertEqual(bundle.issues[0].model_profile, ModelProfile.BALANCED)
-        self.assertEqual(bundle.issues[0].recommended_model, "Gemini 4 Carbon Medium")
+        self.assertEqual(bundle.issues[0].model_profile, ModelProfile.FAST)
+        self.assertEqual(bundle.issues[0].recommended_model, "Gemini 4 Hydrogen Medium")
         serialized_issue = bundle.to_dict()["issues"][0]
-        self.assertEqual(serialized_issue["model_profile"], "balanced")
-        self.assertEqual(serialized_issue["recommended_model"], "Gemini 4 Carbon Medium")
+        self.assertEqual(serialized_issue["model_profile"], "fast")
+        self.assertEqual(serialized_issue["recommended_model"], "Gemini 4 Hydrogen Medium")
         self.assertEqual(len(bundle.open_prs), 1)
         self.assertEqual(bundle.open_prs[0].number, 5)
         self.assertEqual(bundle.recommended_order, [2])
