@@ -15,6 +15,21 @@ class CeremonyLevel(StrEnum):
     N2 = "N2"
 
 
+class ModelProfile(StrEnum):
+    """Canonical complexity and model routing profile for an issue."""
+
+    FAST = "fast"
+    BALANCED = "balanced"
+    DEEP = "deep"
+
+
+DEFAULT_RECOMMENDED_MODELS: dict[ModelProfile, str] = {
+    ModelProfile.FAST: "Flash",
+    ModelProfile.BALANCED: "Gemini 4 Carbon Medium",
+    ModelProfile.DEEP: "Neon High / Pro",
+}
+
+
 class GateStage(StrEnum):
     """Deterministic orchestration gate stages."""
 
@@ -54,6 +69,8 @@ class BatchIssue:
     labels: list[str] = field(default_factory=list)
     suggested_ceremony: CeremonyLevel = CeremonyLevel.N1
     requires_adr_review: bool = False
+    model_profile: ModelProfile = ModelProfile.FAST
+    recommended_model: str = DEFAULT_RECOMMENDED_MODELS[ModelProfile.FAST]
     referenced_files: list[str] = field(default_factory=list)
     depends_on_issues: list[int] = field(default_factory=list)
 
@@ -164,6 +181,8 @@ class AuditIngestItem:
     impact: str = ""
     suggested_ceremony: CeremonyLevel = CeremonyLevel.N1
     requires_adr_review: bool = False
+    model_profile: ModelProfile = ModelProfile.FAST
+    recommended_model: str = DEFAULT_RECOMMENDED_MODELS[ModelProfile.FAST]
     referenced_files: list[str] = field(default_factory=list)
     status: str = "dry-run"
     issue_number: int | None = None

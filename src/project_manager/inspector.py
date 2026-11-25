@@ -8,15 +8,18 @@ import heapq
 import json
 import re
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 from project_manager.models import (
+    DEFAULT_RECOMMENDED_MODELS,
     BatchExecutionPlan,
     BatchInspectionBundle,
     BatchIssue,
     CeremonyLevel,
     GitWorkspaceStatus,
+    ModelProfile,
     OpenPRInfo,
 )
 
@@ -37,6 +40,17 @@ _ADR_KEYWORDS_RE = re.compile(
     re.IGNORECASE,
 )
 _N2_SECTION_RE = re.compile(r"###\s+Objetivos\s+T[eé]cnicos", re.IGNORECASE)
+_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+_CEREMONY_LINE_RE = re.compile(
+    r"^\s*(?:[-*+>]\s+)?(?:\*\*|__|\*|_)?ceremon(?:y|ia)(?:\*\*|__|\*|_)?\s*:"
+    r"\s*(?:\*\*|__|\*|_)?\s*[`*_]*(n1|n2)\b[`*_]*(?:[\s(].*)?$",
+    re.IGNORECASE,
+)
+_MODEL_LINE_RE = re.compile(
+    r"^\s*(?:[-*+>]\s+)?(?:\*\*|__|\*|_)?model(?:o)?(?:\*\*|__|\*|_)?\s*:"
+    r"\s*(?:\*\*|__|\*|_)?\s*[`*_]*(fast|balanced|deep)\b[`*_]*(.*)$",
+    re.IGNORECASE,
+)
 
 
 class InspectorError(RuntimeError):
@@ -144,6 +158,66 @@ def collect_git_workspace_status(local_path: Path, fetch: bool = True) -> GitWor
     )
 
 
+def _iter_non_fenced_lines(text: str) -> Iterator[str]:
+    """Yield lines from markdown text while skipping fenced code blocks."""
+    in_fence = False
+    for line in text.splitlines():
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            yield line
+
+
+def parse_ceremony_header(body: str) -> CeremonyLevel | None:
+    """Extract explicit `**Ceremony:** <N1|N2>` metadata from an issue body if present."""
+    for line in _iter_non_fenced_lines(body or ""):
+        match = _CEREMONY_LINE_RE.match(line)
+        if match:
+            return CeremonyLevel(match.group(1).upper())
+    return None
+
+
+def parse_model_header(body: str) -> tuple[ModelProfile, str] | None:
+    """Extract `(model_profile, recommended_model)` from `**Model:** ...` in an issue body."""
+    for line in _iter_non_fenced_lines(body or ""):
+        match = _MODEL_LINE_RE.match(line)
+        if not match:
+            continue
+        profile = ModelProfile(match.group(1).lower())
+        tail = match.group(2).strip()
+        if "(" in tail and ")" in tail:
+            start = tail.find("(")
+            end = tail.rfind(")")
+            raw_hint = tail[start + 1 : end] if end > start else ""
+        else:
+            raw_hint = tail.lstrip("-–—: ").strip()
+        hint = raw_hint.strip().strip("`*_").strip()
+        recommended = hint or DEFAULT_RECOMMENDED_MODELS[profile]
+        return profile, recommended
+    return None
+
+
+def resolve_issue_model(
+    body: str,
+    ceremony: CeremonyLevel,
+    requires_adr_review: bool,
+) -> tuple[ModelProfile, str]:
+    """Resolve `model_profile` and `recommended_model` from `**Model:**` or fallback."""
+    explicit = parse_model_header(body)
+    if explicit is not None:
+        return explicit
+
+    if requires_adr_review:
+        profile = ModelProfile.DEEP
+    elif ceremony == CeremonyLevel.N2:
+        profile = ModelProfile.BALANCED
+    else:
+        profile = ModelProfile.FAST
+
+    return profile, DEFAULT_RECOMMENDED_MODELS[profile]
+
+
 def classify_issue(
     number: int,
     title: str,
@@ -153,6 +227,7 @@ def classify_issue(
     """Derive preliminary ceremony level (N1/N2), ADR requirement, files, and dependencies."""
     combined = f"{title}\n{body}"
     lower_labels = {lbl.lower() for lbl in labels}
+    explicit_ceremony = parse_ceremony_header(body or "")
 
     referenced_files: list[str] = []
     seen_files: set[str] = set()
@@ -177,12 +252,13 @@ def classify_issue(
     )
 
     is_n2 = bool(
-        requires_adr
+        explicit_ceremony == CeremonyLevel.N2
+        or requires_adr
         or "n2" in lower_labels
         or _N2_SECTION_RE.search(body or "")
         or title.lower().startswith("feat")
     )
-    if "n1" in lower_labels and not requires_adr:
+    if (explicit_ceremony == CeremonyLevel.N1 or "n1" in lower_labels) and not requires_adr:
         is_n2 = False
 
     ceremony = CeremonyLevel.N2 if is_n2 else CeremonyLevel.N1
@@ -203,6 +279,7 @@ def _build_batch_issue(data: dict[str, Any]) -> BatchIssue:
         if (lbl.get("name") if isinstance(lbl, dict) else lbl)
     ]
     ceremony, requires_adr, files, depends_on = classify_issue(num, title, body, labels)
+    model_profile, recommended_model = resolve_issue_model(body, ceremony, requires_adr)
     return BatchIssue(
         number=num,
         title=title,
@@ -212,6 +289,8 @@ def _build_batch_issue(data: dict[str, Any]) -> BatchIssue:
         labels=labels,
         suggested_ceremony=ceremony,
         requires_adr_review=requires_adr,
+        model_profile=model_profile,
+        recommended_model=recommended_model,
         referenced_files=files,
         depends_on_issues=depends_on,
     )

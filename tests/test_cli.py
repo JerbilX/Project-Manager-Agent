@@ -23,6 +23,7 @@ from project_manager.models import (
     GateCheckResult,
     GateStage,
     GitWorkspaceStatus,
+    ModelProfile,
 )
 
 
@@ -140,6 +141,8 @@ class TestCLI(unittest.TestCase):
                     title="refactor(core): fix drift",
                     body="body",
                     suggested_ceremony=CeremonyLevel.N2,
+                    model_profile=ModelProfile.BALANCED,
+                    recommended_model="Gemini 4 Carbon Medium",
                     status="dry-run",
                 )
             ],
@@ -157,6 +160,8 @@ class TestCLI(unittest.TestCase):
         payload = json.loads(out_buf.getvalue())
         self.assertTrue(payload["dry_run"])
         self.assertEqual(payload["items"][0]["finding_id"], "AUD-001")
+        self.assertEqual(payload["items"][0]["model_profile"], "balanced")
+        self.assertEqual(payload["items"][0]["recommended_model"], "Gemini 4 Carbon Medium")
 
         mock_ingest.side_effect = AuditIngestError("Invalid audit report")
         err_buf = io.StringIO()
