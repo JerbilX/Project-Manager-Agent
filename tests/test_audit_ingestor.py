@@ -16,7 +16,7 @@ from project_manager.audit_ingestor import (
     ingest_audit_report,
     load_and_validate_audit_report,
 )
-from project_manager.models import CeremonyLevel
+from project_manager.models import CeremonyLevel, ModelProfile
 
 
 def _sample_audit_report() -> dict[str, object]:
@@ -101,9 +101,45 @@ class TestAuditIngestor(unittest.TestCase):
         }
         title, body, labels = build_finding_issue_payload(finding)
         self.assertEqual(title, "refactor: atender hallazgo AUD-099 en my_func")
+        self.assertIn("**Ceremony:** N1", body)
+        self.assertIn("**Model:** fast (Flash)", body)
         self.assertIn("`src/mod.py` (L12-L34)", body)
         self.assertIn("`my_func`", body)
         self.assertEqual(labels, [])
+
+    def test_build_finding_payload_preserves_explicit_and_injects_after_ceremony(self) -> None:
+        explicit_finding = {
+            "id": "AUD-100",
+            "priority": "HIGH",
+            "file": "src/inspector.py",
+            "proposed_issue": {
+                "title": "feat(inspector): soportar perfiles",
+                "body": (
+                    "**Ceremony:** N2\n"
+                    "**Model:** balanced (Gemini 4 Carbon Medium)\n\n"
+                    "### Objetivos Técnicos\n- Soportar perfiles"
+                ),
+            },
+        }
+        _, explicit_body, _ = build_finding_issue_payload(explicit_finding)
+        self.assertEqual(explicit_body.count("**Model:**"), 1)
+        self.assertIn("**Model:** balanced (Gemini 4 Carbon Medium)", explicit_body)
+
+        ceremony_only_finding = {
+            "id": "AUD-101",
+            "priority": "MEDIUM",
+            "file": "src/inspector.py",
+            "proposed_issue": {
+                "title": "feat(inspector): ajustar parser",
+                "body": "**Ceremony:** N2\n\n### Objetivos Técnicos\n- Ajustar parser",
+            },
+        }
+        _, injected_body, _ = build_finding_issue_payload(ceremony_only_finding)
+        self.assertTrue(
+            injected_body.startswith(
+                "**Ceremony:** N2\n**Model:** balanced (Gemini 4 Carbon Medium)\n"
+            )
+        )
 
     @patch("project_manager.audit_ingestor.run_cmd")
     def test_dry_run_filters_and_sorts_by_priority_without_calling_gh(
@@ -130,8 +166,13 @@ class TestAuditIngestor(unittest.TestCase):
         self.assertTrue(all(item.issue_number is None for item in report.items))
         self.assertEqual(report.items[0].suggested_ceremony, CeremonyLevel.N2)
         self.assertTrue(report.items[0].requires_adr_review)
+        self.assertEqual(report.items[0].model_profile, ModelProfile.DEEP)
+        self.assertEqual(report.items[0].recommended_model, "Neon High / Pro")
+        self.assertIn("**Model:** deep (Neon High / Pro)", report.items[0].body)
         self.assertIn("src/project_manager/inspector.py", report.items[0].referenced_files)
         self.assertEqual(report.items[1].suggested_ceremony, CeremonyLevel.N1)
+        self.assertEqual(report.items[1].model_profile, ModelProfile.FAST)
+        self.assertEqual(report.items[1].recommended_model, "Flash")
         self.assertEqual(report.created_issue_numbers, [])
         self.assertEqual(report.recommended_order, [])
 
@@ -180,6 +221,13 @@ class TestAuditIngestor(unittest.TestCase):
         self.assertEqual(report.created_issue_numbers, [21, 22, 23])
         self.assertEqual(report.recommended_order, [21, 22, 23])
         self.assertEqual(report.adr_review_issues, [21])
+        self.assertEqual(
+            [item["model_profile"] for item in report.to_dict()["items"]],
+            ["deep", "fast", "fast"],
+        )
+        first_gh_cmd = mock_run.call_args_list[0].args[0]
+        body_arg = first_gh_cmd[first_gh_cmd.index("--body") + 1]
+        self.assertIn("**Model:** deep (Neon High / Pro)", body_arg)
         self.assertEqual(
             report.file_collisions,
             {"src/project_manager/inspector.py": [21, 22]},

@@ -7,12 +7,13 @@ Orquestador técnico de lotes de GitHub Issues (**Staff Technical PM**) que coor
 Documentado en [`ADR-0001`](docs/adr/0001-arquitectura-orquestador-lotes-mas-cli-determinista.md):
 
 1. **Fase 1 — Triage Determinista y Plan de Lote (*Front-Loading Executive Decisions*):**
-   - `pm-agent inspect <repo_or_path> [--issues 4,5,6]` recolecta estado Git (`branch`, `is_clean`, `synced_with_origin_dev`), especificación completa de las Issues del lote, clasificación preliminar `N1`/`N2`, dependencias, PRs abiertos y gobernanza local (`docs/adr/` aceptados, `.agents/rules/`, `CONTRIBUTING.md`).
-   - El agente ordena las Issues por dependencias/archivos afectados y levanta **al inicio** todas las decisiones ejecutivas o ADRs pendientes para que el Arquitecto apruebe el **Plan de Lote** una sola vez.
+   - `pm-agent inspect <repo_or_path> [--issues 4,5,6]` recolecta estado Git (`branch`, `is_clean`, `synced_with_origin_dev`), especificación completa de las Issues del lote, clasificación preliminar `N1`/`N2`, perfil de modelo `model_profile` (`fast` | `balanced` | `deep`) y modelo concreto sugerido `recommended_model` desde `**Model:** ...` (con fallback determinista para issues legadas), dependencias, PRs abiertos y gobernanza local (`docs/adr/` aceptados, `.agents/rules/`, `CONTRIBUTING.md`).
+   - En modo ejecutivo (`"dame al PM"`), el agente agrupa las tareas de menor a mayor dificultad (sin exponer IDs técnicos de `#issue`/`#PR`), sugiere en cada opción numerada el **modelo concreto recomendado para la UI** y levanta **al inicio** todas las decisiones ejecutivas o ADRs pendientes para aprobación única del Arquitecto.
 2. **Fase 2 — Ejecución por Tarea con Aislamiento de Contexto y Auto-Merge a `dev`:**
    - **Pre-Task Gate (`pm-agent gate --stage pre-task`):** Verifica por código que el workspace esté en `dev`, con árbol limpio y sincronizado con `origin/dev`.
-   - **Implementación (`invoke_subagent` limpio):** Ejecuta `issue-driven-workflow` (Pasos 1 a 6) en una rama efímera hasta abrir el PR hacia `dev`.
-   - **Auditoría Pre-Merge Obligatoria (`invoke_subagent` + `pr-reviewer`):** Audita el PR sin sesgo de autor.
+   - **Enrutamiento de `Model` en `invoke_subagent`:** Cada tarea enruta automáticamente el parámetro `Model` según su `model_profile` (`fast` → `"flash"`, `balanced` → `"inherit"`, `deep` → `"pro"` o `"inherit"` si la sesión ya corre en `deep`, evitando variantes *Orchestrator* en implementadores).
+   - **Implementación (`invoke_subagent` limpio):** Ejecuta `issue-driven-workflow` (Pasos 1 a 6) en una rama efímera hasta abrir el PR hacia `dev` usando el `Model` enrutado.
+   - **Auditoría Pre-Merge Obligatoria (`invoke_subagent` + `pr-reviewer`):** Audita el PR sin sesgo de autor con el `Model` correspondiente al perfil de la Issue.
      - Si devuelve `REQUEST_CHANGES`: corrige en la misma rama efímera y re-audita (máximo 2 ciclos; si persiste un `BLOCKER`, detiene el lote y escala al Arquitecto).
      - Si devuelve `APPROVE`: ejecuta automáticamente el Squash Merge a `dev` (`gh pr merge --squash --delete-branch`), cierra explícitamente la Issue (`gh issue close --reason completed`), limpia la rama local y verifica el estado con **`pm-agent gate --stage post-merge --issue <id> --pr <pr_id>`**.
 3. **Fase 3 — Quality Gate de Fin de Lote (`codebase-auditor`) y Reporte Ejecutivo:**
@@ -69,7 +70,7 @@ Registrar el directorio `skill/` de forma declarativa en `~/.gemini/config/skill
 ## Roadmap Evolutivo (`v0.2.0+`)
 
 - **`v0.1.0` — Modo Backlog (Implementado):** Ejecución orquestada de lotes de GitHub Issues abiertas existentes en un repositorio objetivo (por lista de IDs `--issues`, por `--label` o todas las abiertas).
-- **`v0.2.0+` — Modo Post-Auditoría (Implementado):** Ingerir hallazgos priorizados de `codebase-audit` (`audit_report.json`) con `pm-agent ingest-audit`, previsualizar el lote en `--dry-run`, crear las Issues aprobadas con `--confirm` y obtener el `recommended_order` listo para ejecutar la remediación en `dev`.
+- **`v0.2.0+` — Modo Post-Auditoría (Implementado):** Ingerir hallazgos priorizados de `codebase-audit` (`audit_report.json`) con `pm-agent ingest-audit`, previsualizar el lote en `--dry-run` (exponiendo `model_profile` y `recommended_model` e inyectando/propagando `**Model:**`), crear las Issues aprobadas con `--confirm` y obtener el `recommended_order` listo para ejecutar la remediación en `dev`.
 - **`v0.2.0+` — Modo Épica / Idea:** Desglosar un requerimiento de alto nivel en múltiples Issues atómicas coherentes (con objetivos técnicos, criterios de aceptación y grafo de dependencias) antes de ejecutar el lote.
 
 ## Tests

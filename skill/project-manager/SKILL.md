@@ -35,11 +35,15 @@ Aplicar íntegramente la rúbrica y protocolo de [`../../prompts/staff_pm.md`](.
    pm-agent inspect <repo_or_path> --issues <id1,id2,...> --out /tmp/pm_inspect.json
    ```
    *(Si el usuario pidió ejecutar por label, todas las abiertas o invocó **"dame al PM"**, omitir `--issues` y usar `--label <lbl>` o el listado por defecto).*
-2. Leer `/tmp/pm_inspect.json`, consumir `recommended_order`, `adr_review_issues`, `file_collisions` y `dependency_cycles` precalculados por `pm-agent inspect`, validar el nivel `N1`/`N2` de cada Issue e identificar **todas** las decisiones ejecutivas o nuevos ADRs necesarios al inicio (si `dependency_cycles` no está vacío, escalar al Arquitecto antes de ejecutar).
-3. **Agrupación por Dificultad y Opciones Numeradas:** Si hay varias Issues pendientes, separarlas en grupos por nivel de dificultad/tamaño (priorizando mejoras pequeñas para achicar el backlog) y ordenarlos de menor a mayor dificultad. Presentar al Arquitecto un resumen funcional corto por grupo (**sin mostrar números de `#issue` ni `#PR`**), incluyendo opciones breves para cualquier decisión de diseño/ADR necesaria, recomendar el grupo más sencillo y ofrecer **opciones numeradas (`1, 2, 3...`)** para elegir qué grupo ejecutar (o realizar otra acción) de forma autónoma (estilo `/goal`). Aguardar su elección antes de iniciar la Fase 2.
+2. Leer `/tmp/pm_inspect.json`, consumir `recommended_order`, `adr_review_issues`, `file_collisions` y `dependency_cycles` precalculados por `pm-agent inspect` junto con `model_profile` (`fast` | `balanced` | `deep`) y `recommended_model` de cada Issue, validar el nivel `N1`/`N2` e identificar **todas** las decisiones ejecutivas o nuevos ADRs necesarios al inicio (si `dependency_cycles` no está vacío, escalar al Arquitecto antes de ejecutar).
+3. **Agrupación por Dificultad, Modelo Sugerido y Opciones Numeradas:** Si hay varias Issues pendientes, separarlas en grupos por nivel de dificultad/tamaño (priorizando mejoras pequeñas para achicar el backlog) y ordenarlos de menor a mayor dificultad. Presentar al Arquitecto un resumen funcional corto por grupo (**sin mostrar números de `#issue` ni `#PR`**), indicando en cada grupo el **modelo concreto recomendado en la UI** (tomando el mayor `model_profile` requerido dentro del grupo: `fast` < `balanced` < `deep`, p. ej. `Flash`, `Gemini 4 Carbon Medium` o `Neon High / Pro`) e incluyendo opciones breves para cualquier decisión de diseño/ADR necesaria. Recomendar el grupo más sencillo y ofrecer **opciones numeradas (`1, 2, 3...`)** para elegir qué grupo ejecutar (o realizar otra acción) de forma autónoma (estilo `/goal`). Aguardar su elección antes de iniciar la Fase 2.
 
 ### Fase 2: Ejecución por Tarea con Subagentes Limpios y Auto-Merge a `dev`
-Por cada Issue `#<id>` en el orden aprobado del Plan de Lote:
+Por cada Issue `#<id>` en el orden aprobado del Plan de Lote, enrutar el parámetro `Model` de `invoke_subagent` según su `model_profile`:
+- `fast` -> `Model: "flash"`
+- `balanced` -> `Model: "inherit"`
+- `deep` -> `Model: "pro"` (o `"inherit"` si la sesión coordinadora ya corre en perfil `deep`)
+- *(Nunca asignar variantes `Orchestrator` a subagentes implementadores).*
 
 1. **Pre-Task Gate:**
    ```bash
@@ -47,10 +51,10 @@ Por cada Issue `#<id>` en el orden aprobado del Plan de Lote:
    ```
    *(Debe retornar exit code `0`: rama `dev`, árbol limpio y sincronizado con `origin/dev`).*
 2. **Implementación Aislada (`invoke_subagent`):**
-   - Invocar `invoke_subagent` (`TypeName: "self"`, `Role: "Issue #<id> Implementer"`) instruyéndolo a ejecutar `issue-driven-workflow` (Pasos 1 a 6) en `<repo_or_path>` hasta abrir el PR hacia `dev` (sin mergear) y reportar el `<pr_id>`.
+   - Invocar `invoke_subagent` (`TypeName: "self"`, `Role: "Issue #<id> Implementer"`, `Model` enrutado según `model_profile`) instruyéndolo a ejecutar `issue-driven-workflow` (Pasos 1 a 6) en `<repo_or_path>` hasta abrir el PR hacia `dev` (sin mergear) y reportar el `<pr_id>`.
 3. **Auditoría Pre-Merge Obligatoria (`invoke_subagent` + `pr-reviewer`):**
-   - Invocar `invoke_subagent` (`TypeName: "self"`, `Role: "PR #<pr_id> Staff Reviewer"`) instruyéndolo a ejecutar el skill `pr-reviewer` (`pr-review gather` + rúbrica + `pr-review publish`) sobre `<pr_id>`.
-   - **Si `REQUEST_CHANGES`:** Re-invocar corrección en la misma rama efímera y re-auditar (máximo **2 ciclos**; si persiste un `BLOCKER`, detener el lote y escalar al Arquitecto).
+   - Invocar `invoke_subagent` (`TypeName: "self"`, `Role: "PR #<pr_id> Staff Reviewer"`, `Model` enrutado según `model_profile` de la Issue) instruyéndolo a ejecutar el skill `pr-reviewer` (`pr-review gather` + rúbrica + `pr-review publish`) sobre `<pr_id>`.
+   - **Si `REQUEST_CHANGES`:** Re-invocar corrección en la misma rama efímera (manteniendo el mismo `Model`) y re-auditar (máximo **2 ciclos**; si persiste un `BLOCKER`, detener el lote y escalar al Arquitecto).
    - **Si `APPROVE`:** Ejecutar automáticamente la integración a `dev` con comandos separados:
      ```bash
      gh pr merge <pr_id> --squash --delete-branch
@@ -91,7 +95,7 @@ Cuando el usuario solicite convertir un reporte `audit_report.json` de `codebase
    ```bash
    pm-agent ingest-audit <repo_or_path> --report /tmp/audit_report.json --min-priority HIGH --out /tmp/pm_audit_preview.json
    ```
-   Leer `/tmp/pm_audit_preview.json` y presentar al Arquitecto los hallazgos propuestos (ordenados `HIGH` → `MEDIUM` → `LOW`, archivos/símbolos afectados y ceremonia estimada `N1`/`N2`).
+   Leer `/tmp/pm_audit_preview.json` y presentar al Arquitecto los hallazgos propuestos (ordenados `HIGH` → `MEDIUM` → `LOW`, archivos/símbolos afectados, ceremonia estimada `N1`/`N2` y perfil de modelo `model_profile` / `recommended_model`).
 2. **Materialización con `--confirm` y ejecución del lote:**
    Una vez aprobado por el Arquitecto, crear las Issues reales en GitHub y obtener el orden de ejecución recomendado (`recommended_order`):
    ```bash

@@ -11,7 +11,10 @@ from typing import Any
 from project_manager.inspector import (
     InspectorError,
     classify_issue,
+    parse_ceremony_header,
+    parse_model_header,
     plan_batch_execution,
+    resolve_issue_model,
     resolve_repo,
     run_cmd,
 )
@@ -20,6 +23,8 @@ from project_manager.models import (
     AuditIngestReport,
     AuditPriority,
     BatchIssue,
+    CeremonyLevel,
+    ModelProfile,
 )
 
 _PRIORITY_RANK: dict[str, int] = {
@@ -62,6 +67,36 @@ def _optional_int(value: Any, field_name: str, finding_id: str) -> int | None:
         ) from exc
 
 
+def _ensure_issue_metadata_header(
+    body: str,
+    ceremony: CeremonyLevel,
+    model_profile: ModelProfile,
+    recommended_model: str,
+) -> str:
+    """Ensure `**Model:**` (and `**Ceremony:**` if absent) appear in the issue body."""
+    if parse_model_header(body) is not None:
+        return body
+
+    model_line = f"**Model:** {model_profile.value} ({recommended_model})"
+    if parse_ceremony_header(body) is not None:
+        lines = body.splitlines()
+        inserted = False
+        out_lines: list[str] = []
+        in_fence = False
+        for line in lines:
+            if line.lstrip().startswith(("```", "~~~")):
+                in_fence = not in_fence
+            out_lines.append(line)
+            if not inserted and not in_fence and parse_ceremony_header(line) is not None:
+                out_lines.append(model_line)
+                inserted = True
+        if inserted:
+            return "\n".join(out_lines)
+
+    header = f"**Ceremony:** {ceremony.value}\n{model_line}"
+    return f"{header}\n\n{body}" if body else header
+
+
 def build_finding_issue_payload(finding: dict[str, Any]) -> tuple[str, str, list[str]]:
     """Build `(title, body, labels)` from a `codebase-auditor` finding dict."""
     finding_id = str(finding.get("id") or "AUD-?").strip()
@@ -81,21 +116,29 @@ def build_finding_issue_payload(finding: dict[str, Any]) -> tuple[str, str, list
     title = str(proposed_dict.get("title") or "").strip()
     body = str(proposed_dict.get("body") or "").strip()
     labels = [str(lbl).strip() for lbl in (raw_labels or []) if str(lbl).strip()]
+    file_path = str(finding.get("file") or "").strip()
 
     if not title:
-        symbol = finding.get("symbol") or finding.get("file") or "codebase"
+        symbol = finding.get("symbol") or file_path or "codebase"
         title = f"refactor: atender hallazgo {finding.get('id', 'AUD')} en {symbol}"
 
     if not body:
         body = (
             f"### Contexto / Evidencia\n"
             f"- **Prioridad:** {finding.get('priority', 'MEDIUM')}\n"
-            f"- **Archivo:** `{finding.get('file', '')}` "
+            f"- **Archivo:** `{file_path}` "
             f"(L{finding.get('start_line', '?')}-L{finding.get('end_line', '?')})\n"
             f"- **Símbolo:** `{finding.get('symbol', '-')}`\n"
             f"- **Evidencia:** {finding.get('evidence', '')}\n"
             f"- **Impacto:** {finding.get('impact', '')}\n"
         )
+
+    ceremony, requires_adr, _, _ = classify_issue(0, title, body, labels)
+    if file_path.startswith("docs/adr/"):
+        requires_adr = True
+        ceremony = CeremonyLevel.N2
+    model_profile, recommended_model = resolve_issue_model(body, ceremony, requires_adr)
+    body = _ensure_issue_metadata_header(body, ceremony, model_profile, recommended_model)
 
     return title, body, labels
 
@@ -169,8 +212,12 @@ def _build_preview_item(finding: dict[str, Any]) -> tuple[AuditIngestItem, list[
     ceremony, requires_adr, referenced_files, depends_on = classify_issue(
         0, title, body, labels
     )
+    if file_path.startswith("docs/adr/"):
+        requires_adr = True
+        ceremony = CeremonyLevel.N2
     if file_path and file_path not in referenced_files:
         referenced_files = [file_path, *referenced_files]
+    model_profile, recommended_model = resolve_issue_model(body, ceremony, requires_adr)
 
     item = AuditIngestItem(
         finding_id=finding_id,
@@ -186,6 +233,8 @@ def _build_preview_item(finding: dict[str, Any]) -> tuple[AuditIngestItem, list[
         impact=impact,
         suggested_ceremony=ceremony,
         requires_adr_review=requires_adr,
+        model_profile=model_profile,
+        recommended_model=recommended_model,
         referenced_files=referenced_files,
         status="dry-run",
         issue_number=None,
@@ -264,6 +313,8 @@ def ingest_audit_report(
                     labels=item.labels,
                     suggested_ceremony=item.suggested_ceremony,
                     requires_adr_review=item.requires_adr_review,
+                    model_profile=item.model_profile,
+                    recommended_model=item.recommended_model,
                     referenced_files=item.referenced_files,
                     depends_on_issues=[dep for dep in depends_on if dep != issue_num],
                 )

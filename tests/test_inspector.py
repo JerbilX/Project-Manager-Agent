@@ -18,13 +18,16 @@ from project_manager.inspector import (
     collect_governance_docs,
     detect_file_collisions,
     inspect_batch,
+    parse_ceremony_header,
     parse_github_repo_from_remote,
     parse_issue_list_arg,
+    parse_model_header,
     plan_batch_execution,
+    resolve_issue_model,
     resolve_repo,
     should_include_adr,
 )
-from project_manager.models import BatchIssue, CeremonyLevel
+from project_manager.models import BatchIssue, CeremonyLevel, ModelProfile
 
 
 def _proc(stdout: str = "", returncode: int = 0, stderr: str = "") -> subprocess.CompletedProcess[str]:
@@ -86,6 +89,76 @@ class TestInspectorHelpers(unittest.TestCase):
         self.assertFalse(should_include_adr(rejected))
         self.assertFalse(should_include_adr(superseded))
         self.assertTrue(should_include_adr("# Sin frontmatter"))
+
+    def test_parse_model_and_ceremony_headers_and_markdown_variants(self) -> None:
+        self.assertEqual(
+            parse_model_header("**Ceremony:** N2\n**Model:** balanced (Gemini 4 Carbon Medium)\n"),
+            (ModelProfile.BALANCED, "Gemini 4 Carbon Medium"),
+        )
+        self.assertEqual(
+            parse_model_header("**model**: FAST (Flash)"),
+            (ModelProfile.FAST, "Flash"),
+        )
+        self.assertEqual(
+            parse_model_header("- **Model:** `balanced` (`Gemini 4 Carbon (Medium)`)"),
+            (ModelProfile.BALANCED, "Gemini 4 Carbon (Medium)"),
+        )
+        self.assertEqual(
+            parse_model_header("Model: DEEP"),
+            (ModelProfile.DEEP, "Neon High / Pro"),
+        )
+        self.assertEqual(
+            parse_model_header("__Model:__ fast ()"),
+            (ModelProfile.FAST, "Flash"),
+        )
+        self.assertEqual(
+            parse_model_header("*Model:* deep — Neon High / Pro"),
+            (ModelProfile.DEEP, "Neon High / Pro"),
+        )
+        fenced_only = (
+            "Texto sin cabecera\n```markdown\n**Ceremony:** N2\n**Model:** deep (Pro)\n```\n"
+        )
+        self.assertIsNone(parse_model_header(fenced_only))
+        self.assertIsNone(parse_ceremony_header(fenced_only))
+
+        ceremony_n1, _, _, _ = classify_issue(
+            9,
+            "feat(ui): pequeño ajuste visual",
+            "**Ceremony:** N1\n**Model:** fast (Flash)\nAjustar padding.",
+            [],
+        )
+        self.assertEqual(ceremony_n1, CeremonyLevel.N1)
+
+        ceremony_n2, _, _, _ = classify_issue(
+            10,
+            "fix(core): revisar invariantes",
+            "- **Ceremony**: `n2`\nDetalle técnico.",
+            [],
+        )
+        self.assertEqual(ceremony_n2, CeremonyLevel.N2)
+
+    def test_resolve_issue_model_fallbacks_and_override(self) -> None:
+        self.assertEqual(
+            resolve_issue_model("Sin metadato", CeremonyLevel.N1, requires_adr_review=False),
+            (ModelProfile.FAST, "Flash"),
+        )
+        self.assertEqual(
+            resolve_issue_model("Sin metadato", CeremonyLevel.N2, requires_adr_review=False),
+            (ModelProfile.BALANCED, "Gemini 4 Carbon Medium"),
+        )
+        self.assertEqual(
+            resolve_issue_model("Sin metadato", CeremonyLevel.N2, requires_adr_review=True),
+            (ModelProfile.DEEP, "Neon High / Pro"),
+        )
+        # Explicit **Model:** overrides heuristic ADR fallback (e.g. referencing an existing ADR)
+        self.assertEqual(
+            resolve_issue_model(
+                "**Model:** balanced (Gemini 4 Carbon Medium)\nExtiende docs/adr/0001-ok.md",
+                CeremonyLevel.N2,
+                requires_adr_review=True,
+            ),
+            (ModelProfile.BALANCED, "Gemini 4 Carbon Medium"),
+        )
 
 
 class TestInspectorCollection(unittest.TestCase):
@@ -150,6 +223,8 @@ class TestInspectorCollection(unittest.TestCase):
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0].number, 4)
         self.assertEqual(issues[0].suggested_ceremony, CeremonyLevel.N1)
+        self.assertEqual(issues[0].model_profile, ModelProfile.FAST)
+        self.assertEqual(issues[0].recommended_model, "Flash")
 
         mock_run.return_value = _proc(json.dumps([issue_4]))
         listed = collect_batch_issues("JerbilX/Repo", issue_numbers=None, label="n1")
@@ -202,6 +277,11 @@ class TestInspectorCollection(unittest.TestCase):
         self.assertEqual(bundle.repo, "JerbilX/Project-Manager-Agent")
         self.assertEqual(len(bundle.issues), 1)
         self.assertEqual(bundle.issues[0].suggested_ceremony, CeremonyLevel.N2)
+        self.assertEqual(bundle.issues[0].model_profile, ModelProfile.BALANCED)
+        self.assertEqual(bundle.issues[0].recommended_model, "Gemini 4 Carbon Medium")
+        serialized_issue = bundle.to_dict()["issues"][0]
+        self.assertEqual(serialized_issue["model_profile"], "balanced")
+        self.assertEqual(serialized_issue["recommended_model"], "Gemini 4 Carbon Medium")
         self.assertEqual(len(bundle.open_prs), 1)
         self.assertEqual(bundle.open_prs[0].number, 5)
         self.assertEqual(bundle.recommended_order, [2])
