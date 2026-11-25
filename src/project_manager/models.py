@@ -15,11 +15,34 @@ class CeremonyLevel(StrEnum):
     N2 = "N2"
 
 
+class ModelProfile(StrEnum):
+    """Canonical complexity and model routing profile for an issue."""
+
+    FAST = "fast"
+    BALANCED = "balanced"
+    DEEP = "deep"
+
+
+DEFAULT_RECOMMENDED_MODELS: dict[ModelProfile, str] = {
+    ModelProfile.FAST: "Flash",
+    ModelProfile.BALANCED: "Gemini 4 Carbon Medium",
+    ModelProfile.DEEP: "Neon High / Pro",
+}
+
+
 class GateStage(StrEnum):
     """Deterministic orchestration gate stages."""
 
     PRE_TASK = "pre-task"
     POST_MERGE = "post-merge"
+
+
+class AuditPriority(StrEnum):
+    """Severity levels for codebase-auditor findings."""
+
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
 
 
 @dataclass(slots=True)
@@ -46,6 +69,8 @@ class BatchIssue:
     labels: list[str] = field(default_factory=list)
     suggested_ceremony: CeremonyLevel = CeremonyLevel.N1
     requires_adr_review: bool = False
+    model_profile: ModelProfile = ModelProfile.FAST
+    recommended_model: str = DEFAULT_RECOMMENDED_MODELS[ModelProfile.FAST]
     referenced_files: list[str] = field(default_factory=list)
     depends_on_issues: list[int] = field(default_factory=list)
 
@@ -63,6 +88,16 @@ class OpenPRInfo:
 
 
 @dataclass(slots=True)
+class BatchExecutionPlan:
+    """Deterministic topological plan, ADR review list, collisions, and cycles."""
+
+    recommended_order: list[int] = field(default_factory=list)
+    adr_review_issues: list[int] = field(default_factory=list)
+    file_collisions: dict[str, list[int]] = field(default_factory=dict)
+    dependency_cycles: list[list[int]] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class BatchInspectionBundle:
     """Full deterministic context collected during Phase 1 (Batch Triage)."""
 
@@ -72,6 +107,10 @@ class BatchInspectionBundle:
     issues: list[BatchIssue] = field(default_factory=list)
     open_prs: list[OpenPRInfo] = field(default_factory=list)
     governance_docs: dict[str, str] = field(default_factory=dict)
+    recommended_order: list[int] = field(default_factory=list)
+    adr_review_issues: list[int] = field(default_factory=list)
+    file_collisions: dict[str, list[int]] = field(default_factory=dict)
+    dependency_cycles: list[list[int]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize inspection bundle to a JSON-compatible dictionary."""
@@ -122,4 +161,52 @@ class BatchSummaryReport:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize batch summary report to a JSON-compatible dictionary."""
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class AuditIngestItem:
+    """Preview or created GitHub Issue derived from a codebase-auditor finding."""
+
+    finding_id: str
+    priority: str
+    title: str
+    body: str
+    labels: list[str] = field(default_factory=list)
+    file: str = ""
+    start_line: int | None = None
+    end_line: int | None = None
+    symbol: str = ""
+    evidence: str = ""
+    impact: str = ""
+    suggested_ceremony: CeremonyLevel = CeremonyLevel.N1
+    requires_adr_review: bool = False
+    model_profile: ModelProfile = ModelProfile.FAST
+    recommended_model: str = DEFAULT_RECOMMENDED_MODELS[ModelProfile.FAST]
+    referenced_files: list[str] = field(default_factory=list)
+    status: str = "dry-run"
+    issue_number: int | None = None
+    issue_url: str = ""
+
+
+@dataclass(slots=True)
+class AuditIngestReport:
+    """Result of ingesting a codebase-auditor report in dry-run or confirm mode."""
+
+    repo: str
+    report_path: str
+    min_priority: str
+    dry_run: bool
+    summary: str = ""
+    total_findings: int = 0
+    selected_count: int = 0
+    skipped_count: int = 0
+    items: list[AuditIngestItem] = field(default_factory=list)
+    created_issue_numbers: list[int] = field(default_factory=list)
+    recommended_order: list[int] = field(default_factory=list)
+    adr_review_issues: list[int] = field(default_factory=list)
+    file_collisions: dict[str, list[int]] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize audit ingestion report to a JSON-compatible dictionary."""
         return asdict(self)

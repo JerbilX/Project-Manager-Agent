@@ -4,17 +4,22 @@
 from __future__ import annotations
 
 import base64
+import heapq
 import json
 import re
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 from project_manager.models import (
+    DEFAULT_RECOMMENDED_MODELS,
+    BatchExecutionPlan,
     BatchInspectionBundle,
     BatchIssue,
     CeremonyLevel,
     GitWorkspaceStatus,
+    ModelProfile,
     OpenPRInfo,
 )
 
@@ -35,6 +40,17 @@ _ADR_KEYWORDS_RE = re.compile(
     re.IGNORECASE,
 )
 _N2_SECTION_RE = re.compile(r"###\s+Objetivos\s+T[eé]cnicos", re.IGNORECASE)
+_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+_CEREMONY_LINE_RE = re.compile(
+    r"^\s*(?:[-*+>]\s+)?(?:\*\*|__|\*|_)?ceremon(?:y|ia)(?:\*\*|__|\*|_)?\s*:"
+    r"\s*(?:\*\*|__|\*|_)?\s*[`*_]*(n1|n2)\b[`*_]*(?:[\s(].*)?$",
+    re.IGNORECASE,
+)
+_MODEL_LINE_RE = re.compile(
+    r"^\s*(?:[-*+>]\s+)?(?:\*\*|__|\*|_)?model(?:o)?(?:\*\*|__|\*|_)?\s*:"
+    r"\s*(?:\*\*|__|\*|_)?\s*[`*_]*(fast|balanced|deep)\b[`*_]*(.*)$",
+    re.IGNORECASE,
+)
 
 
 class InspectorError(RuntimeError):
@@ -142,6 +158,66 @@ def collect_git_workspace_status(local_path: Path, fetch: bool = True) -> GitWor
     )
 
 
+def _iter_non_fenced_lines(text: str) -> Iterator[str]:
+    """Yield lines from markdown text while skipping fenced code blocks."""
+    in_fence = False
+    for line in text.splitlines():
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            yield line
+
+
+def parse_ceremony_header(body: str) -> CeremonyLevel | None:
+    """Extract explicit `**Ceremony:** <N1|N2>` metadata from an issue body if present."""
+    for line in _iter_non_fenced_lines(body or ""):
+        match = _CEREMONY_LINE_RE.match(line)
+        if match:
+            return CeremonyLevel(match.group(1).upper())
+    return None
+
+
+def parse_model_header(body: str) -> tuple[ModelProfile, str] | None:
+    """Extract `(model_profile, recommended_model)` from `**Model:** ...` in an issue body."""
+    for line in _iter_non_fenced_lines(body or ""):
+        match = _MODEL_LINE_RE.match(line)
+        if not match:
+            continue
+        profile = ModelProfile(match.group(1).lower())
+        tail = match.group(2).strip()
+        if "(" in tail and ")" in tail:
+            start = tail.find("(")
+            end = tail.rfind(")")
+            raw_hint = tail[start + 1 : end] if end > start else ""
+        else:
+            raw_hint = tail.lstrip("-–—: ").strip()
+        hint = raw_hint.strip().strip("`*_").strip()
+        recommended = hint or DEFAULT_RECOMMENDED_MODELS[profile]
+        return profile, recommended
+    return None
+
+
+def resolve_issue_model(
+    body: str,
+    ceremony: CeremonyLevel,
+    requires_adr_review: bool,
+) -> tuple[ModelProfile, str]:
+    """Resolve `model_profile` and `recommended_model` from `**Model:**` or fallback."""
+    explicit = parse_model_header(body)
+    if explicit is not None:
+        return explicit
+
+    if requires_adr_review:
+        profile = ModelProfile.DEEP
+    elif ceremony == CeremonyLevel.N2:
+        profile = ModelProfile.BALANCED
+    else:
+        profile = ModelProfile.FAST
+
+    return profile, DEFAULT_RECOMMENDED_MODELS[profile]
+
+
 def classify_issue(
     number: int,
     title: str,
@@ -151,6 +227,7 @@ def classify_issue(
     """Derive preliminary ceremony level (N1/N2), ADR requirement, files, and dependencies."""
     combined = f"{title}\n{body}"
     lower_labels = {lbl.lower() for lbl in labels}
+    explicit_ceremony = parse_ceremony_header(body or "")
 
     referenced_files: list[str] = []
     seen_files: set[str] = set()
@@ -175,12 +252,13 @@ def classify_issue(
     )
 
     is_n2 = bool(
-        requires_adr
+        explicit_ceremony == CeremonyLevel.N2
+        or requires_adr
         or "n2" in lower_labels
         or _N2_SECTION_RE.search(body or "")
         or title.lower().startswith("feat")
     )
-    if "n1" in lower_labels and not requires_adr:
+    if (explicit_ceremony == CeremonyLevel.N1 or "n1" in lower_labels) and not requires_adr:
         is_n2 = False
 
     ceremony = CeremonyLevel.N2 if is_n2 else CeremonyLevel.N1
@@ -201,6 +279,7 @@ def _build_batch_issue(data: dict[str, Any]) -> BatchIssue:
         if (lbl.get("name") if isinstance(lbl, dict) else lbl)
     ]
     ceremony, requires_adr, files, depends_on = classify_issue(num, title, body, labels)
+    model_profile, recommended_model = resolve_issue_model(body, ceremony, requires_adr)
     return BatchIssue(
         number=num,
         title=title,
@@ -210,6 +289,8 @@ def _build_batch_issue(data: dict[str, Any]) -> BatchIssue:
         labels=labels,
         suggested_ceremony=ceremony,
         requires_adr_review=requires_adr,
+        model_profile=model_profile,
+        recommended_model=recommended_model,
         referenced_files=files,
         depends_on_issues=depends_on,
     )
@@ -374,6 +455,134 @@ def collect_governance_docs(
     return docs
 
 
+def _issue_priority_key(issue: BatchIssue) -> tuple[int, int]:
+    """Return deterministic priority key: ADR-required N2 issues first, then lowest issue number."""
+    adr_rank = (
+        0
+        if (issue.suggested_ceremony == CeremonyLevel.N2 and issue.requires_adr_review)
+        else 1
+    )
+    return (adr_rank, issue.number)
+
+
+def detect_file_collisions(issues: list[BatchIssue]) -> dict[str, list[int]]:
+    """Return paths in `referenced_files` touched by 2 or more issues in the batch."""
+    file_to_issues: dict[str, set[int]] = {}
+    for issue in issues:
+        for path in issue.referenced_files:
+            file_to_issues.setdefault(path, set()).add(issue.number)
+    return {
+        path: sorted(issue_nums)
+        for path, issue_nums in sorted(file_to_issues.items())
+        if len(issue_nums) >= 2
+    }
+
+
+def _find_dependency_cycles(deps_graph: dict[int, list[int]]) -> list[list[int]]:
+    """Detect strongly connected dependency cycles using Tarjan's algorithm."""
+    index = 0
+    indices: dict[int, int] = {}
+    lowlink: dict[int, int] = {}
+    on_stack: set[int] = set()
+    stack: list[int] = []
+    cycles: list[list[int]] = []
+
+    def strongconnect(node: int) -> None:
+        nonlocal index
+        indices[node] = index
+        lowlink[node] = index
+        index += 1
+        stack.append(node)
+        on_stack.add(node)
+
+        for dep in deps_graph.get(node, []):
+            if dep not in indices:
+                strongconnect(dep)
+                lowlink[node] = min(lowlink[node], lowlink[dep])
+            elif dep in on_stack:
+                lowlink[node] = min(lowlink[node], indices[dep])
+
+        if lowlink[node] == indices[node]:
+            scc: list[int] = []
+            while True:
+                member = stack.pop()
+                on_stack.remove(member)
+                scc.append(member)
+                if member == node:
+                    break
+            if len(scc) > 1 or (len(scc) == 1 and scc[0] in deps_graph.get(scc[0], [])):
+                cycles.append(sorted(scc))
+
+    for node in sorted(deps_graph):
+        if node not in indices:
+            strongconnect(node)
+
+    cycles.sort(key=lambda cycle: cycle[0])
+    return cycles
+
+
+def plan_batch_execution(issues: list[BatchIssue]) -> BatchExecutionPlan:
+    """Compute deterministic topological order, ADR review list, file collisions, and cycles."""
+    if not issues:
+        return BatchExecutionPlan()
+
+    issues_by_num = {issue.number: issue for issue in issues}
+    deps_graph: dict[int, list[int]] = {}
+    in_degree: dict[int, int] = {}
+    dependents: dict[int, list[int]] = {}
+
+    for issue in issues:
+        valid_deps = sorted({dep for dep in issue.depends_on_issues if dep in issues_by_num})
+        deps_graph[issue.number] = valid_deps
+        in_degree[issue.number] = len(valid_deps)
+        for dep in valid_deps:
+            dependents.setdefault(dep, []).append(issue.number)
+
+    dependency_cycles = _find_dependency_cycles(deps_graph)
+
+    heap: list[tuple[int, int]] = []
+    for num in sorted(issues_by_num):
+        if in_degree[num] == 0:
+            heapq.heappush(heap, _issue_priority_key(issues_by_num[num]))
+
+    recommended_order: list[int] = []
+    visited: set[int] = set()
+
+    while len(recommended_order) < len(issues_by_num):
+        if not heap:
+            remaining = [num for num in issues_by_num if num not in visited]
+            next_num = min(
+                remaining,
+                key=lambda num: (in_degree[num], *_issue_priority_key(issues_by_num[num])),
+            )
+            heapq.heappush(heap, _issue_priority_key(issues_by_num[next_num]))
+
+        _, current = heapq.heappop(heap)
+        if current in visited:
+            continue
+        visited.add(current)
+        recommended_order.append(current)
+
+        for dep_num in dependents.get(current, []):
+            if dep_num in visited:
+                continue
+            in_degree[dep_num] -= 1
+            if in_degree[dep_num] <= 0:
+                heapq.heappush(heap, _issue_priority_key(issues_by_num[dep_num]))
+
+    adr_review_issues = [
+        num for num in recommended_order if issues_by_num[num].requires_adr_review
+    ]
+    file_collisions = detect_file_collisions(issues)
+
+    return BatchExecutionPlan(
+        recommended_order=recommended_order,
+        adr_review_issues=adr_review_issues,
+        file_collisions=file_collisions,
+        dependency_cycles=dependency_cycles,
+    )
+
+
 def inspect_batch(
     repo_or_path: str,
     issue_numbers: list[int] | None = None,
@@ -387,6 +596,7 @@ def inspect_batch(
     issues = collect_batch_issues(repo, issue_numbers=issue_numbers, label=label, limit=limit)
     open_prs = collect_open_prs(repo)
     governance_docs = collect_governance_docs(repo, local_path)
+    plan = plan_batch_execution(issues)
 
     return BatchInspectionBundle(
         repo=repo,
@@ -395,4 +605,8 @@ def inspect_batch(
         issues=issues,
         open_prs=open_prs,
         governance_docs=governance_docs,
+        recommended_order=plan.recommended_order,
+        adr_review_issues=plan.adr_review_issues,
+        file_collisions=plan.file_collisions,
+        dependency_cycles=plan.dependency_cycles,
     )
