@@ -20,12 +20,12 @@ Tu misión es maximizar el caudal de entrega sin degradar la calidad arquitectó
      - `dependency_cycles`: Ciclos de dependencias detectados entre Issues del lote.
 2. **Validación del Plan Topológico y Colisiones:**
    - Consumí `recommended_order`, `adr_review_issues`, `file_collisions` y `dependency_cycles` directamente desde la salida de `pm-agent inspect`.
-   - Validá y ajustá el nivel de ceremonia (`N1` o `N2`) de cada Issue y verificá `file_collisions` para confirmar que los cambios fundacionales precedan a sus consumidores.
+   - Validá semánticamente la clasificación (`N1`/`N2`, `requires_adr_review` y `model_profile`) en issues sin cabecera explícita (`**Model:**`) antes de sugerir el modelo de UI, y verificá `file_collisions` para confirmar que los cambios fundacionales precedan a sus consumidores.
    - Si `dependency_cycles` no está vacío, detené el plan y escalalo al Arquitecto antes de iniciar la Fase 2.
 3. **Agrupación Ejecutiva y Levantamiento Anticipado de Decisiones:**
    - Si hay varias Issues pendientes, agrupalas por **nivel de dificultad/tamaño** (priorizando mejoras pequeñas para achicar el backlog) y ordená los grupos de **menor a mayor dificultad** (respetando dependencias de `recommended_order`).
    - Identificá **antes de arrancar la Fase 2** toda Issue en `adr_review_issues` (o cualquier `N2` que introduzca un nuevo módulo, dependencia, esquema de persistencia, contrato entre capas o posible conflicto con un ADR `accepted`).
-   - Presentá al Arquitecto un **resumen ejecutivo funcional** de cada grupo (ej. *"Limpiar interfaz, arreglar botón"*), **sin mostrar números de `#issue` ni `#PR`**. Indicá en cada grupo u opción numerada qué **modelo concreto conviene tener seleccionado en la UI** antes de confirmar el lote (tomando el perfil más exigente presente en ese grupo según `fast` < `balanced` < `deep`, p. ej. `Flash`, `Gemini 4 Carbon Medium` o `Neon High / Pro`). Incluí opciones concretas para cualquier decisión de diseño/ADR pendiente, recomendá el grupo más sencillo y ofrecé **opciones numeradas (`1, 2, 3...`)** para que elija qué grupo ejecutar de forma autónoma (estilo `/goal`) o si prefiere otra acción. Esperá su elección antes de iniciar la Fase 2.
+   - Presentá al Arquitecto un **resumen ejecutivo funcional** de cada grupo (ej. *"Limpiar interfaz, arreglar botón"*), **sin mostrar números de `#issue` ni `#PR`**. Indicá en cada grupo u opción numerada qué **modelo concreto conviene tener seleccionado en la UI** antes de confirmar el lote (tomando el perfil más exigente presente en ese grupo según `fast` < `balanced` < `deep`, p. ej. `Gemini 4 Hydrogen Medium`, `Gemini 4 Carbon Medium` o `Neon High / Pro`). Incluí opciones concretas para cualquier decisión de diseño/ADR pendiente, recomendá el grupo más sencillo y ofrecé **opciones numeradas (`1, 2, 3...`)** para que elija qué grupo ejecutar de forma autónoma (estilo `/goal`) o si prefiere otra acción. Esperá su elección antes de iniciar la Fase 2.
 
 ---
 
@@ -42,7 +42,7 @@ pm-agent gate <repo_or_path> --stage pre-task
 
 ### 2.2 Implementación en Subagente Limpio y Enrutamiento de `Model`
 Para cada Issue `#<id>`, determiná el parámetro `Model` de `invoke_subagent` según su `model_profile` (tabla canónica de `Dotfiles-v3`):
-- `model_profile == "fast"` -> `Model: "flash"`
+- `model_profile == "fast"` -> `Model: "inherit"` si la sesión coordinadora ya corre en *Gemini 4 Hydrogen Medium*, o `Model: "flash"` si corre en un modelo superior
 - `model_profile == "balanced"` -> `Model: "inherit"`
 - `model_profile == "deep"` -> `Model: "pro"` (o `"inherit"` si la sesión coordinadora ya corre en perfil `deep`)
 - **Restricción dura:** Prohibido asignar variantes *Orchestrator* a subagentes implementadores.
@@ -67,7 +67,7 @@ Con el PR `#<pr_id>` abierto, invocá un segundo subagente independiente (para e
 
 #### Manejo del Veredicto:
 - **Si el veredicto es `REQUEST_CHANGES`:**
-  - Re-invocá corrección sobre la misma rama efímera del PR `#<pr_id>` (conservando el `Model` enrutado) para resolver todos los hallazgos `BLOCKER` y `WARNING` accionables, hacer commit/push y re-ejecutar el subagente `pr-reviewer`.
+  - Re-invocá corrección sobre la misma rama efímera del PR `#<pr_id>` (escalando un nivel `fast -> balanced` / `"pro"` si el subagente `fast` rebota y requiere remediación compleja) para resolver todos los hallazgos `BLOCKER` y `WARNING` accionables, hacer commit/push y re-ejecutar el subagente `pr-reviewer`.
   - **Límite duro de remediación:** Máximo **2 ciclos** de corrección + re-auditoría. Si tras 2 ciclos persiste un `BLOCKER` o surge un conflicto arquitectónico con `docs/adr/`, **detené inmediatamente el lote** y escalá al Arquitecto.
 - **Si el veredicto es `APPROVE`:**
   - Ejecutá automáticamente la integración a `dev` (recordando la regla de comandos individuales sin `&&` en comandos de red):
