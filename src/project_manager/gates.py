@@ -19,6 +19,7 @@ from project_manager.models import (
     GateCheckResult,
     GateStage,
     GitWorkspaceStatus,
+    LandResult,
 )
 
 _ISSUE_CLOSE_RE = re.compile(
@@ -302,4 +303,167 @@ def build_batch_summary(
         ready_for_release_eval=ready_for_release_eval,
         items=items,
         markdown_summary=markdown,
+    )
+
+
+def _resolve_ephemeral_branch(repo: str, pr_number: int, local_path: Any) -> str | None:
+    """Resolve the local ephemeral branch associated with the PR, if any."""
+    pr_res = run_cmd(
+        ["gh", "pr", "view", str(pr_number), "--repo", repo, "--json", "headRefName"],
+        cwd=local_path,
+        check=False,
+    )
+    candidates: list[str] = []
+    if pr_res.returncode == 0 and pr_res.stdout.strip():
+        try:
+            head_ref = (json.loads(pr_res.stdout).get("headRefName") or "").strip()
+            if head_ref:
+                candidates.append(head_ref)
+        except json.JSONDecodeError:
+            pass
+
+    head_res = run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=local_path, check=False)
+    if head_res.returncode == 0:
+        current = head_res.stdout.strip()
+        if current:
+            candidates.append(current)
+
+    for branch in candidates:
+        if branch not in {"dev", "main", "HEAD"}:
+            return branch
+    return None
+
+
+def _run_land_step(
+    cmd: list[str],
+    local_path: Any,
+    step_name: str,
+    steps: dict[str, bool],
+    errors: list[str],
+) -> bool:
+    """Execute a `land` subprocess step, recording pass/fail status and any error."""
+    res = run_cmd(cmd, cwd=local_path, check=False)
+    if res.returncode == 0:
+        steps[step_name] = True
+        return True
+    detail = res.stderr.strip() or res.stdout.strip() or f"exit code {res.returncode}"
+    steps[step_name] = False
+    errors.append(f"Step '{step_name}' failed ({' '.join(cmd)}): {detail}")
+    return False
+
+
+def land_pr(
+    repo_or_path: str,
+    issue_number: int,
+    pr_number: int,
+    fetch: bool = False,
+) -> LandResult:
+    """Squash-merge PR, close issue, sync local `dev`, clean ephemeral branch, and verify post-merge."""
+    try:
+        repo, local_path = resolve_repo(repo_or_path)
+    except InspectorError as exc:
+        raise GateError(str(exc)) from exc
+
+    if local_path is None:
+        raise GateError("land requires a local repository path.")
+
+    steps: dict[str, bool] = {}
+    errors: list[str] = []
+    deleted_local_branch: str | None = None
+    ephemeral_branch = _resolve_ephemeral_branch(repo, pr_number, local_path)
+
+    if not _run_land_step(
+        ["gh", "pr", "merge", str(pr_number), "--repo", repo, "--squash", "--delete-branch"],
+        local_path,
+        "pr_merged",
+        steps,
+        errors,
+    ):
+        return LandResult(
+            repo=repo,
+            local_path=str(local_path),
+            issue_number=issue_number,
+            pr_number=pr_number,
+            passed=False,
+            steps=steps,
+            errors=errors,
+        )
+
+    _run_land_step(
+        ["gh", "issue", "close", str(issue_number), "--repo", repo, "--reason", "completed"],
+        local_path,
+        "issue_closed",
+        steps,
+        errors,
+    )
+
+    if not _run_land_step(["git", "switch", "dev"], local_path, "switched_to_dev", steps, errors):
+        return LandResult(
+            repo=repo,
+            local_path=str(local_path),
+            issue_number=issue_number,
+            pr_number=pr_number,
+            passed=False,
+            steps=steps,
+            errors=errors,
+        )
+
+    if not _run_land_step(
+        ["git", "pull", "--prune", "--ff-only"],
+        local_path,
+        "pulled_dev",
+        steps,
+        errors,
+    ):
+        return LandResult(
+            repo=repo,
+            local_path=str(local_path),
+            issue_number=issue_number,
+            pr_number=pr_number,
+            passed=False,
+            steps=steps,
+            errors=errors,
+        )
+
+    if ephemeral_branch:
+        ref_check = run_cmd(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{ephemeral_branch}"],
+            cwd=local_path,
+            check=False,
+        )
+        if ref_check.returncode == 0:
+            if _run_land_step(
+                ["git", "branch", "-D", ephemeral_branch],
+                local_path,
+                "cleaned_local_branch",
+                steps,
+                errors,
+            ):
+                deleted_local_branch = ephemeral_branch
+        else:
+            steps["cleaned_local_branch"] = True
+    else:
+        steps["cleaned_local_branch"] = True
+
+    post_merge_gate = run_post_merge_gate(
+        str(local_path),
+        issue_number=issue_number,
+        pr_number=pr_number,
+        fetch=fetch,
+    )
+    steps["post_merge_verified"] = post_merge_gate.passed
+    if not post_merge_gate.passed:
+        errors.extend(post_merge_gate.errors)
+
+    passed = all(steps.values()) and post_merge_gate.passed and not errors
+    return LandResult(
+        repo=repo,
+        local_path=str(local_path),
+        issue_number=issue_number,
+        pr_number=pr_number,
+        passed=passed,
+        steps=steps,
+        deleted_local_branch=deleted_local_branch,
+        post_merge_gate=post_merge_gate,
+        errors=errors,
     )

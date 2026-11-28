@@ -12,6 +12,7 @@ from project_manager.audit_ingestor import AuditIngestError, ingest_audit_report
 from project_manager.gates import (
     GateError,
     build_batch_summary,
+    land_pr,
     run_post_merge_gate,
     run_pre_task_gate,
 )
@@ -33,6 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_p.add_argument("--label", help="Filter open backlog issues by label.")
     inspect_p.add_argument("--limit", type=int, default=30, help="Max open issues to fetch (default: 30).")
     inspect_p.add_argument("--no-fetch", action="store_true", help="Skip `git fetch --prune origin`.")
+    inspect_p.add_argument(
+        "--compact",
+        action="store_true",
+        help="Omit full governance_docs bodies and truncate long issue bodies for triage.",
+    )
     inspect_p.add_argument("--out", help="Optional output file path (defaults to stdout).")
 
     gate_p = subparsers.add_parser("gate", help="Verify pre-task or post-merge workspace invariants.")
@@ -84,6 +90,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     audit_p.add_argument("--out", help="Optional output file path (defaults to stdout).")
 
+    land_p = subparsers.add_parser(
+        "land",
+        help="Squash-merge an approved PR, close issue, sync `dev`, and run post-merge gate.",
+    )
+    land_p.add_argument("repo_or_path", nargs="?", default=".", help="Local repository path.")
+    land_p.add_argument("--issue", type=int, required=True, help="Issue number.")
+    land_p.add_argument("--pr", type=int, required=True, help="Pull Request number.")
+    land_p.add_argument(
+        "--no-fetch",
+        action="store_true",
+        help="Skip `git fetch --prune origin` in post-merge verification.",
+    )
+    land_p.add_argument("--out", help="Optional output file path (defaults to stdout).")
+
     return parser
 
 
@@ -111,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
                 label=args.label,
                 limit=args.limit,
                 fetch=not args.no_fetch,
+                compact=args.compact,
             )
             payload = json.dumps(bundle.to_dict(), indent=2, ensure_ascii=False)
             _write_or_print(payload, args.out)
@@ -157,6 +178,17 @@ def main(argv: list[str] | None = None) -> int:
             payload = json.dumps(audit_report.to_dict(), indent=2, ensure_ascii=False)
             _write_or_print(payload, args.out)
             return 0
+
+        if args.command == "land":
+            result = land_pr(
+                args.repo_or_path,
+                issue_number=args.issue,
+                pr_number=args.pr,
+                fetch=not args.no_fetch,
+            )
+            payload = json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
+            _write_or_print(payload, args.out)
+            return 0 if result.passed else 1
 
     except (InspectorError, GateError, AuditIngestError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

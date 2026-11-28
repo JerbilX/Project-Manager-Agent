@@ -134,6 +134,25 @@ class GateCheckResult:
 
 
 @dataclass(slots=True)
+class LandResult:
+    """Result of deterministic post-approval PR landing and post-merge verification."""
+
+    repo: str
+    local_path: str
+    issue_number: int
+    pr_number: int
+    passed: bool
+    steps: dict[str, bool] = field(default_factory=dict)
+    deleted_local_branch: str | None = None
+    post_merge_gate: GateCheckResult | None = None
+    errors: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize land result to a JSON-compatible dictionary."""
+        return asdict(self)
+
+
+@dataclass(slots=True)
 class BatchSummaryItem:
     """Final execution status for a single issue in a batch."""
 
