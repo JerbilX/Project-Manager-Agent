@@ -645,12 +645,23 @@ def plan_batch_execution(issues: list[BatchIssue]) -> BatchExecutionPlan:
     )
 
 
+_COMPACT_BODY_MAX_CHARS = 200
+
+
+def _compact_issue_body(body: str, max_chars: int = _COMPACT_BODY_MAX_CHARS) -> str:
+    """Truncate long issue bodies for `--compact` triage payloads."""
+    if len(body) <= max_chars:
+        return body
+    return f"{body[:max_chars].rstrip()}... [truncated, {len(body)} chars total]"
+
+
 def inspect_batch(
     repo_or_path: str,
     issue_numbers: list[int] | None = None,
     label: str | None = None,
     limit: int = 30,
     fetch: bool = True,
+    compact: bool = False,
 ) -> BatchInspectionBundle:
     """Collect full deterministic context for Phase 1 batch triage and planning."""
     repo, local_path = resolve_repo(repo_or_path)
@@ -659,6 +670,14 @@ def inspect_batch(
     open_prs = collect_open_prs(repo)
     governance_docs = collect_governance_docs(repo, local_path)
     plan = plan_batch_execution(issues)
+
+    if compact:
+        for issue in issues:
+            issue.body = _compact_issue_body(issue.body)
+        governance_docs = {
+            path: f"[omitted in compact mode, {len(content)} chars]"
+            for path, content in governance_docs.items()
+        }
 
     return BatchInspectionBundle(
         repo=repo,

@@ -12,10 +12,11 @@ from unittest.mock import patch
 from project_manager.gates import (
     GateError,
     build_batch_summary,
+    land_pr,
     run_post_merge_gate,
     run_pre_task_gate,
 )
-from project_manager.models import GateStage, GitWorkspaceStatus
+from project_manager.models import GateCheckResult, GateStage, GitWorkspaceStatus
 
 
 def _proc(stdout: str = "", returncode: int = 0, stderr: str = "") -> subprocess.CompletedProcess[str]:
@@ -182,6 +183,89 @@ class TestGates(unittest.TestCase):
 
         with self.assertRaises(GateError):
             build_batch_summary("/tmp/repo", issue_numbers=[], fetch=False)
+
+    @patch("project_manager.gates.run_post_merge_gate")
+    @patch("project_manager.gates.run_cmd")
+    @patch("project_manager.gates.resolve_repo")
+    def test_land_pr_success_and_branch_cleanup(
+        self,
+        mock_resolve: unittest.mock.MagicMock,
+        mock_run: unittest.mock.MagicMock,
+        mock_post_merge: unittest.mock.MagicMock,
+    ) -> None:
+        mock_resolve.return_value = ("JerbilX/Repo", Path("/tmp/repo"))
+        mock_run.side_effect = [
+            _proc(json.dumps({"headRefName": "feat/issue-17-land"})),  # gh pr view
+            _proc("feat/issue-17-land\n"),  # git rev-parse HEAD
+            _proc(""),  # gh pr merge
+            _proc(""),  # gh issue close
+            _proc(""),  # git switch dev
+            _proc(""),  # git pull --prune --ff-only
+            _proc(""),  # git show-ref --verify (branch exists)
+            _proc(""),  # git branch -D
+        ]
+        mock_post_merge.return_value = GateCheckResult(
+            repo="JerbilX/Repo",
+            stage=GateStage.POST_MERGE,
+            passed=True,
+            checks={"on_dev_branch": True, "issue_closed": True, "pr_merged_to_dev": True},
+        )
+        res = land_pr("/tmp/repo", issue_number=17, pr_number=25, fetch=False)
+        self.assertTrue(res.passed)
+        self.assertEqual(res.deleted_local_branch, "feat/issue-17-land")
+        self.assertTrue(res.steps["pr_merged"])
+        self.assertTrue(res.steps["issue_closed"])
+        self.assertTrue(res.steps["switched_to_dev"])
+        self.assertTrue(res.steps["pulled_dev"])
+        self.assertTrue(res.steps["cleaned_local_branch"])
+        self.assertTrue(res.steps["post_merge_verified"])
+        self.assertEqual(res.errors, [])
+
+    @patch("project_manager.gates.run_post_merge_gate")
+    @patch("project_manager.gates.run_cmd")
+    @patch("project_manager.gates.resolve_repo")
+    def test_land_pr_failures(
+        self,
+        mock_resolve: unittest.mock.MagicMock,
+        mock_run: unittest.mock.MagicMock,
+        mock_post_merge: unittest.mock.MagicMock,
+    ) -> None:
+        mock_resolve.return_value = ("JerbilX/Repo", None)
+        with self.assertRaises(GateError):
+            land_pr("JerbilX/Repo", issue_number=17, pr_number=25)
+
+        mock_resolve.return_value = ("JerbilX/Repo", Path("/tmp/repo"))
+        mock_run.side_effect = [
+            _proc(json.dumps({"headRefName": "feat/issue-17-land"})),
+            _proc("feat/issue-17-land\n"),
+            _proc("", returncode=1, stderr="PR not mergeable"),
+        ]
+        merge_fail = land_pr("/tmp/repo", issue_number=17, pr_number=25)
+        self.assertFalse(merge_fail.passed)
+        self.assertFalse(merge_fail.steps["pr_merged"])
+        self.assertIn("PR not mergeable", merge_fail.errors[0])
+        mock_post_merge.assert_not_called()
+
+        mock_run.side_effect = [
+            _proc(json.dumps({"headRefName": "feat/issue-17-land"})),
+            _proc("dev\n"),
+            _proc(""),  # gh pr merge
+            _proc(""),  # gh issue close
+            _proc(""),  # git switch dev
+            _proc(""),  # git pull
+            _proc("", returncode=1),  # git show-ref (already deleted)
+        ]
+        mock_post_merge.return_value = GateCheckResult(
+            repo="JerbilX/Repo",
+            stage=GateStage.POST_MERGE,
+            passed=False,
+            checks={"on_dev_branch": True, "issue_closed": False, "pr_merged_to_dev": True},
+            errors=["Issue #17 is not CLOSED"],
+        )
+        gate_fail = land_pr("/tmp/repo", issue_number=17, pr_number=25)
+        self.assertFalse(gate_fail.passed)
+        self.assertFalse(gate_fail.steps["post_merge_verified"])
+        self.assertIn("Issue #17 is not CLOSED", gate_fail.errors)
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ from project_manager.models import (
     GateCheckResult,
     GateStage,
     GitWorkspaceStatus,
+    LandResult,
     ModelProfile,
 )
 
@@ -39,8 +40,16 @@ class TestCLI(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             out_file = Path(tmp) / "inspect.json"
-            code = main(["inspect", "/tmp/repo", "--issues", "1,2", "--no-fetch", "--out", str(out_file)])
+            code = main(["inspect", "/tmp/repo", "--issues", "1,2", "--no-fetch", "--compact", "--out", str(out_file)])
             self.assertEqual(code, 0)
+            mock_inspect.assert_called_once_with(
+                "/tmp/repo",
+                issue_numbers=[1, 2],
+                label=None,
+                limit=30,
+                fetch=False,
+                compact=True,
+            )
             payload = json.loads(out_file.read_text(encoding="utf-8"))
             self.assertEqual(payload["repo"], "JerbilX/Project-Manager-Agent")
 
@@ -179,6 +188,41 @@ class TestCLI(unittest.TestCase):
             )
         self.assertEqual(err_code, 1)
         self.assertIn("Invalid audit report", err_buf.getvalue())
+
+    @patch("project_manager.cli.land_pr")
+    def test_cli_land_exit_codes_and_json(self, mock_land: unittest.mock.MagicMock) -> None:
+        mock_land.return_value = LandResult(
+            repo="JerbilX/Repo",
+            local_path="/tmp/repo",
+            issue_number=17,
+            pr_number=25,
+            passed=True,
+            steps={"pr_merged": True, "post_merge_verified": True},
+            deleted_local_branch="feat/issue-17-land",
+        )
+        out_buf = io.StringIO()
+        with redirect_stdout(out_buf):
+            code = main(["land", "/tmp/repo", "--issue", "17", "--pr", "25", "--no-fetch"])
+        self.assertEqual(code, 0)
+        payload = json.loads(out_buf.getvalue())
+        self.assertTrue(payload["passed"])
+        self.assertEqual(payload["deleted_local_branch"], "feat/issue-17-land")
+
+        mock_land.return_value = LandResult(
+            repo="JerbilX/Repo",
+            local_path="/tmp/repo",
+            issue_number=17,
+            pr_number=25,
+            passed=False,
+            steps={"pr_merged": False},
+            errors=["Step 'pr_merged' failed"],
+        )
+        fail_buf = io.StringIO()
+        with redirect_stdout(fail_buf):
+            fail_code = main(["land", "/tmp/repo", "--issue", "17", "--pr", "25"])
+        self.assertEqual(fail_code, 1)
+        fail_payload = json.loads(fail_buf.getvalue())
+        self.assertFalse(fail_payload["passed"])
 
 
 if __name__ == "__main__":

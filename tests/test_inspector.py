@@ -407,6 +407,61 @@ class TestBatchPlanning(unittest.TestCase):
         plan = plan_batch_execution(issues)
         self.assertEqual(plan.file_collisions, collisions)
 
+    @patch("project_manager.inspector.collect_governance_docs")
+    @patch("project_manager.inspector.collect_open_prs")
+    @patch("project_manager.inspector.collect_batch_issues")
+    @patch("project_manager.inspector.collect_git_workspace_status")
+    @patch("project_manager.inspector.resolve_repo")
+    def test_inspect_batch_compact_mode(
+        self,
+        mock_resolve: unittest.mock.MagicMock,
+        mock_git: unittest.mock.MagicMock,
+        mock_issues: unittest.mock.MagicMock,
+        mock_prs: unittest.mock.MagicMock,
+        mock_gov: unittest.mock.MagicMock,
+    ) -> None:
+        mock_resolve.return_value = ("JerbilX/Repo", Path("/tmp/repo"))
+        mock_git.return_value = None
+        long_body = "Detalle extenso de la tarea. " * 20
+        mock_issues.return_value = [
+            BatchIssue(
+                number=17,
+                title="feat(cli): land and compact",
+                body=long_body,
+                state="OPEN",
+                url="https://github.com/JerbilX/Repo/issues/17",
+                suggested_ceremony=CeremonyLevel.N2,
+                requires_adr_review=False,
+                model_profile=ModelProfile.FAST,
+                recommended_model="Gemini 4 Hydrogen Medium",
+                referenced_files=["src/project_manager/cli.py"],
+            ),
+            BatchIssue(
+                number=18,
+                title="fix(cli): short",
+                body="Cuerpo corto.",
+                state="OPEN",
+                url="https://github.com/JerbilX/Repo/issues/18",
+                referenced_files=["src/project_manager/cli.py"],
+            ),
+        ]
+        mock_prs.return_value = []
+        mock_gov.return_value = {
+            "CONTRIBUTING.md": "# Guide\n" + ("x" * 500),
+            "docs/adr/0001.md": "# ADR\n" + ("y" * 300),
+        }
+
+        bundle = inspect_batch("/tmp/repo", fetch=False, compact=True)
+        self.assertEqual(bundle.recommended_order, [17, 18])
+        self.assertEqual(bundle.file_collisions, {"src/project_manager/cli.py": [17, 18]})
+        self.assertEqual(bundle.issues[0].suggested_ceremony, CeremonyLevel.N2)
+        self.assertEqual(bundle.issues[0].model_profile, ModelProfile.FAST)
+        self.assertIn("[truncated,", bundle.issues[0].body)
+        self.assertLess(len(bundle.issues[0].body), len(long_body))
+        self.assertEqual(bundle.issues[1].body, "Cuerpo corto.")
+        self.assertTrue(bundle.governance_docs["CONTRIBUTING.md"].startswith("[omitted in compact mode,"))
+        self.assertTrue(bundle.governance_docs["docs/adr/0001.md"].startswith("[omitted in compact mode,"))
+
 
 if __name__ == "__main__":
     unittest.main()
